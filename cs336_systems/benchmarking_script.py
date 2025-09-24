@@ -3,36 +3,87 @@ import numpy as np
 import torch
 import argparse
 import json
+import math
 
 import cs336_basics
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.data import get_batch
 from cs336_basics.optimizer import AdamW
-from cs336_basics.nn_utils import cross_entropy
+from cs336_basics.nn_utils import cross_entropy, softmax
 
+import torch.cuda.nvtx as nvtx
+from einops import einsum
+from torch import Tensor
+from jaxtyping import Float, Bool
+
+@nvtx.range("scaled dot production attention")
+def annotated_scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys    d_k"],
+    V: Float[Tensor, " ... keys    d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    """Scaled dot-product attention.
+
+    This function implements Eq. 1 of the Transformer paper.
+
+    Args:
+        Q: Tensor of queries, may have any number of leading dimensions.
+        K: Tensor of keys, sharing leading dimensions with Q.
+        V: Tensor of values, sharding leading dimensions with Q and K.
+        mask: An (optional) mask of shape (..., seq_len, seq_len).
+            Attention scores for positions with a mask value of `False` should
+            be masked out, i.e., not affect the softmaxed attention probabilities.
+
+    Returns:
+        torch.FloatTensor of shape (..., seq_len, value_dimension)
+        with the output of running your scaled dot product attention
+        implementation with the provided key, query, and value tensors.
+    """
+
+    with nvtx.range("computing attention score"):
+        d_k = K.shape[-1]
+        attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
+
+        if mask is not None:
+            attention_scores = torch.where(mask, attention_scores, float("-inf"))
+
+    with nvtx.range("computing softmax"):
+        attention_weights = softmax(attention_scores, dim=-1)  # Softmax over the key dimension
+
+    with nvtx.range("final matmul"):
+        output = einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
+    return output
+
+cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
 
 def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps, train_steps, do_backward):
     x, y = get_batch(
         dataset, batch_size, context_length, "cuda" 
     )
     def train_step():
-        y_hat = model(x)
+        with nvtx.range("Forward Pass"):
+            y_hat = model(x)
         if do_backward:
-            optimizer.zero_grad()
-            loss = cross_entropy(y_hat, y)
-            loss.backward()
-            optimizer.step()
+            with nvtx.range("Backward Pass"):
+                optimizer.zero_grad()
+                loss = cross_entropy(y_hat, y)
+                loss.backward()
+                optimizer.step()
+
         torch.cuda.synchronize()
 
     # Warmup steps
-    for _ in range(warmup_steps):
-        train_step()
+    with nvtx.range("Warmup Phase"):
+        for _ in range(warmup_steps):
+            train_step()
 
     # Timed steps
     elapses = []
-    for _ in range(train_steps):
-        elapsed = timeit.timeit(train_step, number=1)
-        elapses.append(elapsed)
+    with nvtx.range("Timing Phase"):
+        for _ in range(train_steps):
+            elapsed = timeit.timeit(train_step, number=1)
+            elapses.append(elapsed)
     return np.mean(elapses).item(), np.std(elapses).item()
 
 
