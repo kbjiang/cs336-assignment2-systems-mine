@@ -6,7 +6,7 @@ import json
 import math
 
 import cs336_basics
-from cs336_basics.model import BasicsTransformerLM
+from cs336_basics.model import BasicsTransformerLM, silu
 from cs336_basics.data import get_batch
 from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy, softmax
@@ -56,6 +56,21 @@ def annotated_scaled_dot_product_attention(
     return output
 
 cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+
+@nvtx.range("SwiGLU forward")
+class AnnotatedSwiGLU(cs336_basics.model.SwiGLU):
+    def forward(self, x):
+        with nvtx.range("SwiGLU_forward"):
+            with nvtx.range("SwiGLU_w1"):
+                w1_out = self.w1(x)
+            with nvtx.range("SwiGLU_w3"):
+                w3_out = self.w3(x)
+            with nvtx.range("SwiGLU_gating"):
+                gated = silu(w1_out) * w3_out
+            with nvtx.range("SwiGLU_w2"):
+                return self.w2(gated)
+
+cs336_basics.model.SwiGLU = AnnotatedSwiGLU
 
 def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps, train_steps, do_backward):
     x, y = get_batch(
