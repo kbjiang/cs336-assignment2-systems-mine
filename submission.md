@@ -53,3 +53,58 @@
 ### Answers
 #### mixed_precision_accumulation
 1. As long as accumulation `s` is `float32`, the result is close. 
+
+
+# PyTorch Autocast (Mixed Precision Training) Summary
+
+## What Autocast Does
+- **Does NOT change model parameter dtypes** - parameters stay float32
+- **Automatically converts tensors during operations** - strategically chooses which ops to run in float16
+- **Operation-specific rules**:
+  - Matrix multiplications (Linear, Conv2d): Convert to float16
+  - Reductions (softmax, LayerNorm): Keep float32 for stability
+  - Element-wise ops (ReLU): Preserve input dtype
+
+## Basic Usage
+```python
+# Correct autocast syntax
+with torch.autocast(device_type="cuda", dtype=torch.float16):
+    y_pred = model(x)
+    loss = loss_fn(y_pred, target)
+
+# Backward pass OUTSIDE autocast
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
+```
+
+## Data Type Flow in Mixed Precision
+- **Parameters**: float32 (for precision)
+- **Forward activations**: float16 (for speed) 
+- **Gradients**: float32 (for numerical stability)
+- **Optimizer updates**: float32 (for precision)
+
+## Where Speed Comes From
+1. **GPU Tensor Cores**: 2-4x faster float16 matrix operations on modern GPUs
+2. **Memory bandwidth**: Half the memory usage (2 bytes vs 4 bytes per element)
+3. **Cache efficiency**: 2x more data fits in GPU cache
+
+## Proper Mixed Precision Training
+```python
+scaler = torch.cuda.amp.GradScaler()
+
+with torch.autocast(device_type="cuda", dtype=torch.float16):
+    y_pred = model(x)
+    loss = loss_fn(y_pred, target)
+
+optimizer.zero_grad()
+scaler.scale(loss).backward()  # Prevent gradient underflow
+scaler.step(optimizer)
+scaler.update()
+```
+
+## Key Insights
+- Autocast converts float32→float16→float32 during operations
+- Conversion overhead is minimal compared to compute speedup
+- Gradients stay float32 to prevent underflow and maintain stability
+- Mixed precision = speed of float16 + stability of float32
