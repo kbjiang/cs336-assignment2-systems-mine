@@ -15,6 +15,7 @@ import torch.cuda.nvtx as nvtx
 from einops import einsum
 from torch import Tensor
 from jaxtyping import Float, Bool
+from contextlib import nullcontext
 
 @nvtx.range("scaled dot production attention")
 def annotated_scaled_dot_product_attention(
@@ -76,6 +77,7 @@ def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps
     x, y = get_batch(
         dataset, batch_size, context_length, "cuda" 
     )
+    precision_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_mixed_precision else nullcontext()
     def train_step():
         with nvtx.range("Forward Pass"):
             y_hat = model(x)
