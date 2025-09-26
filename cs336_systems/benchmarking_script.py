@@ -73,7 +73,19 @@ class AnnotatedSwiGLU(cs336_basics.model.SwiGLU):
 
 cs336_basics.model.SwiGLU = AnnotatedSwiGLU
 
-def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps, train_steps, do_backward, use_mixed_precision):
+def run_test(
+    dataset: np.ndarray, 
+    model: BasicsTransformerLM, 
+    optimizer: AdamW, 
+    batch_size: int, 
+    context_length: int, 
+    warmup_steps: int, 
+    train_steps: int, 
+    do_backward: bool, 
+    use_mixed_precision: bool, 
+    do_memory_profiling: bool,
+    memory_profile_name: str = "memory-snapshot.pickle",
+) -> tuple[float, float]:
     x, y = get_batch(
         dataset, batch_size, context_length, "cuda" 
     )
@@ -98,8 +110,9 @@ def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps
         for _ in range(warmup_steps):
             train_step()
 
-    # Start recording memory history
-    torch.cuda.memory._record_memory_history(max_entries=1000_000)
+    if do_memory_profiling:
+        # Start recording memory history
+        torch.cuda.memory._record_memory_history(max_entries=1000_000)
     # Timed steps
     elapses = []
     with nvtx.range("Timing Phase"):
@@ -107,10 +120,11 @@ def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps
             elapsed = timeit.timeit(train_step, number=1)
             elapses.append(elapsed)
 
-    # Savea pickle file to be loaded by PyTorch's online tool.
-    torch.cuda.memory._dump_snapshot("memory-snapshot.pickle")
-    # Stop recording history
-    torch.cuda.memory._record_memory_history(enabled=None)
+    if do_memory_profiling:
+        # Savea pickle file to be loaded by PyTorch's online tool.
+        torch.cuda.memory._dump_snapshot(memory_profile_name)
+        # Stop recording history
+        torch.cuda.memory._record_memory_history(enabled=None)
 
     return np.mean(elapses).item(), np.std(elapses).item()
 
@@ -131,8 +145,14 @@ if __name__ == "__main__":
     parser.add_argument('--warmup', action='store_true', help='If passed, do warmup.')
     parser.add_argument('--backward', action='store_true', help='If passed, do backward pass')
     parser.add_argument('--mixed-precision', action='store_true', help='If passed, use mixed precision')
+    parser.add_argument('--memory-profiling', action='store_true', help='If passed, do memory profiling')
+    parser.add_argument('--memory-profile-name', type=str, default='memory-snapshot.pickle', help='Name for memory profile output file (only used with --memory-profiling)')
     
     args = parser.parse_args()
+
+    # Validation (optional - warn if name provided without profiling)
+    if args.memory_profile_name != 'memory-snapshot.pickle' and not args.memory_profiling:
+        print("Warning: --memory-profile-name will be ignored without --memory-profiling")
     
     model = BasicsTransformerLM(
         vocab_size=args.vocab_size,
@@ -149,9 +169,17 @@ if __name__ == "__main__":
     dataset = np.random.randint(0, args.vocab_size, 1024)
     
     elapsed_mean, elapsed_std = run_test(
-        dataset, model, optimizer, args.batch_size, args.context_length, 
-        args.warmup_steps if args.warmup else 0,
-        args.train_steps, args.backward, args.mixed_precision)
+        dataset=dataset, 
+        model=model, 
+        optimizer=optimizer, 
+        batch_size=args.batch_size, 
+        context_length=args.context_length, 
+        warmup_steps=args.warmup_steps if args.warmup else 0,
+        train_steps=args.train_steps, 
+        do_backward=args.backward, 
+        use_mixed_precision=args.mixed_precision,
+        do_memory_profiling=args.memory_profiling,
+        memory_profile_name=args.memory_profile_name)
 
     result = {
         "num_steps": args.train_steps,
