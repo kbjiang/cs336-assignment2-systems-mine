@@ -73,14 +73,17 @@ class AnnotatedSwiGLU(cs336_basics.model.SwiGLU):
 
 cs336_basics.model.SwiGLU = AnnotatedSwiGLU
 
-def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps, train_steps, do_backward):
+def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps, train_steps, do_backward, use_mixed_precision):
     x, y = get_batch(
         dataset, batch_size, context_length, "cuda" 
     )
+
+    # `nullcontext` to control mixed precision or not
     precision_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_mixed_precision else nullcontext()
     def train_step():
         with nvtx.range("Forward Pass"):
-            y_hat = model(x)
+            with precision_context:
+                y_hat = model(x)
         if do_backward:
             with nvtx.range("Backward Pass"):
                 optimizer.zero_grad()
@@ -95,12 +98,20 @@ def run_test(dataset, model, optimizer, batch_size, context_length, warmup_steps
         for _ in range(warmup_steps):
             train_step()
 
+    # Start recording memory history
+    torch.cuda.memory._record_memory_history(max_entries=1000_000)
     # Timed steps
     elapses = []
     with nvtx.range("Timing Phase"):
         for _ in range(train_steps):
             elapsed = timeit.timeit(train_step, number=1)
             elapses.append(elapsed)
+
+    # Savea pickle file to be loaded by PyTorch's online tool.
+    torch.cuda.memory._dump_snapshot("memory-snapshot.pickle")
+    # Stop recording history
+    torch.cuda.memory._record_memory_history(enabled=None)
+
     return np.mean(elapses).item(), np.std(elapses).item()
 
 
@@ -117,8 +128,9 @@ if __name__ == "__main__":
     parser.add_argument('--num-heads', type=int, default=12, help='Number of attention heads')
     parser.add_argument('--warmup-steps', type=int, default=5, help='Number of warmup steps')
     parser.add_argument('--train-steps', type=int, default=10, help='Number of training steps to time')
-    parser.add_argument('--warmup-unaware', action='store_true', help='If passed, do not consider warmup.')
-    parser.add_argument('--skip-backward', action='store_true', help='If passed, exclude backward pass in timing')
+    parser.add_argument('--warmup', action='store_true', help='If passed, do warmup.')
+    parser.add_argument('--backward', action='store_true', help='If passed, do backward pass')
+    parser.add_argument('--mixed-precision', action='store_true', help='If passed, use mixed precision')
     
     args = parser.parse_args()
     
@@ -138,13 +150,13 @@ if __name__ == "__main__":
     
     elapsed_mean, elapsed_std = run_test(
         dataset, model, optimizer, args.batch_size, args.context_length, 
-        args.warmup_steps if not args.warmup_unaware else 0,
-        args.train_steps, not args.skip_backward)
+        args.warmup_steps if args.warmup else 0,
+        args.train_steps, args.backward, args.mixed_precision)
 
     result = {
         "num_steps": args.train_steps,
-        "warmup_awareness": not args.warmup_unaware,
-        "backward_inclusion": not args.skip_backward,
+        "warmup": args.warmup,
+        "backward": args.backward,
         "d_model": args.d_model,
         "d_off": args.d_ff,
         "num_layers": args.num_layers,

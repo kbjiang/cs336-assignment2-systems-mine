@@ -45,22 +45,29 @@ def run_test(model, optimizer, warmup_steps, train_steps, do_backward):
         for _ in range(warmup_steps):
             train_step()
 
+    # Start recording memory history
+    torch.cuda.memory._record_memory_history(max_entries=1000_000)
     # Timed steps
     elapses = []
     with nvtx.range("Timing Phase"):
         for _ in range(train_steps):
             elapsed = timeit.timeit(train_step, number=1)
             elapses.append(elapsed)
-    return np.mean(elapses).item(), np.std(elapses).item()
 
+    # Savea pickle file to be loaded by PyTorch's online tool.
+    torch.cuda.memory._dump_snapshot("memory-snapshot-toy.pickle")
+    # Stop recording history
+    torch.cuda.memory._record_memory_history(enabled=None)
+
+    return np.mean(elapses).item(), np.std(elapses).item()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Benchmark transformer training')
     
     parser.add_argument('--warmup-steps', type=int, default=5, help='Number of warmup steps')
     parser.add_argument('--train-steps', type=int, default=10, help='Number of training steps to time')
-    parser.add_argument('--warmup-unaware', action='store_true', help='If passed, do not consider warmup.')
-    parser.add_argument('--skip-backward', action='store_true', help='If passed, exclude backward pass in timing')
+    parser.add_argument('--warmup', action='store_true', help='If passed, do warmup.')
+    parser.add_argument('--backward', action='store_true', help='If passed, do backward pass')
     
     args = parser.parse_args()
 
@@ -74,13 +81,13 @@ if __name__ == "__main__":
     
     elapsed_mean, elapsed_std = run_test(
         model, optimizer,
-        args.warmup_steps if not args.warmup_unaware else 0,
-        args.train_steps, not args.skip_backward)
+        args.warmup_steps if args.warmup else 0,
+        args.train_steps, args.backward)
 
     result = {
         "num_steps": args.train_steps,
-        "warmup_awareness": not args.warmup_unaware,
-        "backward_inclusion": not args.skip_backward,
+        "warmup": args.warmup,
+        "backward": args.backward,
         "elapsed_mean": round(elapsed_mean, 4),
         "elapsed_std": round(elapsed_std, 4),
     }

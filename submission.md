@@ -11,7 +11,7 @@
     1. Download `.run` file from https://developer.nvidia.com/tools-downloads
     1. run and `export PATH=$PATH:$HOME/nsight-systems/bin`
 1. `nvtx` is very helpful to isolate kernels for different parts of the calculation. To see operations by NVTX phase, 
-    1. To get the report, run `nsys profile --python-backtrace=cuda --cudabacktrace=all --pytorch=autograd-nvtx python your_script.py` 
+    1. To get the report, run `nsys profile --python-backtrace=cuda --cudabacktrace=all --pytorch=autograd-nvtx python your_script.py --warmup --backward --mixed-precision` 
         1. `backtrace` for..., `autograd-nvtx` for...
     1. To see by `nvtx` section
         1. CLI: `nsys stats --report cuda_gpu_trace --format table --filter-nvtx "Forward Pass"  report.nsys-rep`
@@ -51,29 +51,36 @@
         # 0.0400085449, 0.0400085449  # identical by accident
         # 0.0500183105, 0.0500106812
         ```
-1. Data Type Flow in Mixed Precision
-    - **Parameters**: float32 (for precision)
-    - **Forward activations**: float16 (for speed) 
-        ```python
-        # What happens inside autocast:
-        x = torch.randn(4, 3, dtype=torch.float32).cuda()  # Input: float32
-        weight = torch.randn(10, 3, dtype=torch.float32).cuda()  # Param: float32
+1. `torch.autocast`
+    1. Data Type Flow in Mixed Precision
+        - **Parameters**: float32 (for precision)
+        - **Forward activations**: float16 (for speed) 
+            ```python
+            # What happens inside autocast:
+            x = torch.randn(4, 3, dtype=torch.float32).cuda()  # Input: float32
+            weight = torch.randn(10, 3, dtype=torch.float32).cuda()  # Param: float32
 
-        # During matrix multiplication, autocast converts both to float16:
-        # result = torch.matmul(x.half(), weight.half())  # Both converted to float16
-        # So the output is float16
-        ```
-    - **Gradients**: float32 (for preventing underflow and numerical stability)
-    - **Optimizer updates**: float32 (for precision)
-1. Where Speed Comes From
-    - **GPU Tensor Cores**: 2-4x faster float16 matrix operations on modern GPUs
-    - **Memory bandwidth**: Half the memory usage (2 bytes vs 4 bytes per element)
-    - **Cache efficiency**: 2x more data fits in GPU cache
-1. Key Insights
-    - Autocast converts float32→float16→float32 during operations
-    - Conversion overhead is minimal compared to compute speedup
-    - Gradients stay float32 to prevent underflow and maintain stability
-    - Mixed precision = speed of float16 + stability of float32
+            # During matrix multiplication, autocast converts both to float16:
+            # result = torch.matmul(x.half(), weight.half())  # Both converted to float16
+            # So the output is float16
+            ```
+        - **Gradients**: float32 (for preventing underflow and numerical stability)
+        - **Optimizer updates**: float32 (for precision)
+    1. Where Speed Comes From
+        - **GPU Tensor Cores**: 2-4x faster float16 matrix operations on modern GPUs
+        - **Memory bandwidth**: Half the memory usage (2 bytes vs 4 bytes per element)
+        - **Cache efficiency**: 2x more data fits in GPU cache
+    1. Key Insights
+        - Autocast converts float32→float16→float32 during operations
+        - Conversion overhead is minimal compared to compute speedup
+        - Gradients stay float32 to prevent underflow and maintain stability
+        - Mixed precision = speed of float16 + stability of float32
+1. `nullcontext` is useful for conditionally enabling/disabling other context managers
+    ```python
+    context = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_mixed_precision else nullcontext()
+    with context:
+        ...
+    ```
 
 ### Answers
 #### mixed_precision_accumulation
