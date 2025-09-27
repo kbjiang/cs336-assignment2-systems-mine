@@ -16,6 +16,7 @@ from einops import einsum
 from torch import Tensor
 from jaxtyping import Float, Bool
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 @nvtx.range("scaled dot production attention")
 def annotated_scaled_dot_product_attention(
@@ -129,10 +130,19 @@ def run_test(
 
     return np.mean(elapses).item(), np.std(elapses).item()
 
-# Add this after parsing arguments
+# Add this mapping after your imports
+MODEL_CONFIGS = {
+    "small": SimpleNamespace(d_model=768, d_ff=3072, num_layers=12, num_heads=12),
+    "medium": SimpleNamespace(d_model=1024, d_ff=4096, num_layers=24, num_heads=16),
+    "large": SimpleNamespace(d_model=1280, d_ff=5120, num_layers=36, num_heads=20),
+    "xl": SimpleNamespace(d_model=1600, d_ff=6400, num_layers=48, num_heads=25),
+    "2.7b": SimpleNamespace(d_model=2560, d_ff=10240, num_layers=32, num_heads=32),
+}
+
+# Add DTYPE_MAP here, right after parsing arguments
 DTYPE_MAP = {
-    "torch.float16": torch.float16,
-    "torch.bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
 }
 
 if __name__ == "__main__":
@@ -142,26 +152,38 @@ if __name__ == "__main__":
     parser.add_argument('--rope-theta', type=int, default=10000, help='RoPE theta value')
     parser.add_argument('--batch-size', type=int, default=4, help='Batch size')
     parser.add_argument('--context-length', type=int, default=256, help='Context length')
-    parser.add_argument('--d-model', type=int, default=768, help='Model dimension')
-    parser.add_argument('--d-ff', type=int, default=3072, help='Feed forward dimension')
-    parser.add_argument('--num-layers', type=int, default=12, help='Number of layers')
-    parser.add_argument('--num-heads', type=int, default=12, help='Number of attention heads')
+
+    # Add the size argument
+    parser.add_argument('--size', choices=list(MODEL_CONFIGS.keys()), default='small', 
+                        help='Model size configuration')
+
+    # Keep individual arguments for override capability
+    parser.add_argument('--d-model', type=int, help='Model dimension')
+    parser.add_argument('--d-ff', type=int, help='Feed forward dimension')
+    parser.add_argument('--num-layers', type=int, help='Number of layers')
+    parser.add_argument('--num-heads', type=int, help='Number of attention heads')
     parser.add_argument('--warmup-steps', type=int, default=5, help='Number of warmup steps')
     parser.add_argument('--train-steps', type=int, default=10, help='Number of training steps to time')
     parser.add_argument('--warmup', action='store_true', help='If passed, do warmup.')
     parser.add_argument('--backward', action='store_true', help='If passed, do backward pass')
     parser.add_argument('--mixed-precision', action='store_true', help='If passed, use mixed precision')
-    parser.add_argument('--mixed-precision-dtype', default='torch.float16', help='Mixed precision dtype')
+    parser.add_argument('--mixed-precision-dtype', default='bfloat16', help='Mixed precision dtype')
     parser.add_argument('--memory-profiling', action='store_true', help='If passed, do memory profiling')
     parser.add_argument('--memory-profile-name', type=str, default='memory-snapshot.pickle', help='Name for memory profile output file (only used with --memory-profiling)')
     
     args = parser.parse_args()
 
-    # Add DTYPE_MAP here, right after parsing arguments
-    DTYPE_MAP = {
-        "torch.float16": torch.float16,
-        "torch.bfloat16": torch.bfloat16,
-    }
+    # Get config from size, then override with individual arguments if provided
+    config = MODEL_CONFIGS[args.size]
+    if args.d_model is not None:
+        config.d_model = args.d_model
+    if args.d_ff is not None:
+        config.d_ff = args.d_ff
+    if args.num_layers is not None:
+        config.num_layers = args.num_layers
+    if args.num_heads is not None:
+        config.num_heads = args.num_heads
+
     
     # Convert string to actual dtype
     mixed_precision_dtype = DTYPE_MAP[args.mixed_precision_dtype]
@@ -173,10 +195,10 @@ if __name__ == "__main__":
     model = BasicsTransformerLM(
         vocab_size=args.vocab_size,
         context_length=args.context_length,
-        d_model=args.d_model,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        d_ff=args.d_ff,
+        d_model=config.d_model,
+        num_layers=config.num_layers,
+        num_heads=config.num_heads,
+        d_ff=config.d_ff,
         rope_theta=args.rope_theta,
     )
     model.to("cuda:0")
@@ -202,10 +224,10 @@ if __name__ == "__main__":
         "num_steps": args.train_steps,
         "warmup": args.warmup,
         "backward": args.backward,
-        "d_model": args.d_model,
-        "d_off": args.d_ff,
-        "num_layers": args.num_layers,
-        "num_heads": args.num_heads,
+        "d_model": config.d_model,
+        "d_off": config.d_ff,
+        "num_layers": config.num_layers,
+        "num_heads": config.num_heads,
         "elapsed_mean": round(elapsed_mean, 4),
         "elapsed_std": round(elapsed_std, 4),
     }
