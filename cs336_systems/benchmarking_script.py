@@ -83,6 +83,7 @@ def run_test(
     train_steps: int, 
     do_backward: bool, 
     use_mixed_precision: bool, 
+    mixed_precision_dtype: torch.dtype, 
     do_memory_profiling: bool,
     memory_profile_name: str = "memory-snapshot.pickle",
 ) -> tuple[float, float]:
@@ -91,15 +92,15 @@ def run_test(
     )
 
     # `nullcontext` to control mixed precision or not
-    precision_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_mixed_precision else nullcontext()
+    precision_context = torch.autocast(device_type="cuda", dtype=mixed_precision_dtype) if use_mixed_precision else nullcontext()
     def train_step():
         with nvtx.range("Forward Pass"):
             with precision_context:
                 y_hat = model(x)
+                loss = cross_entropy(y_hat, y)
         if do_backward:
             with nvtx.range("Backward Pass"):
                 optimizer.zero_grad()
-                loss = cross_entropy(y_hat, y)
                 loss.backward()
                 optimizer.step()
 
@@ -128,6 +129,11 @@ def run_test(
 
     return np.mean(elapses).item(), np.std(elapses).item()
 
+# Add this after parsing arguments
+DTYPE_MAP = {
+    "torch.float16": torch.float16,
+    "torch.bfloat16": torch.bfloat16,
+}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Benchmark transformer training')
@@ -145,10 +151,20 @@ if __name__ == "__main__":
     parser.add_argument('--warmup', action='store_true', help='If passed, do warmup.')
     parser.add_argument('--backward', action='store_true', help='If passed, do backward pass')
     parser.add_argument('--mixed-precision', action='store_true', help='If passed, use mixed precision')
+    parser.add_argument('--mixed-precision-dtype', default='torch.float16', help='Mixed precision dtype')
     parser.add_argument('--memory-profiling', action='store_true', help='If passed, do memory profiling')
     parser.add_argument('--memory-profile-name', type=str, default='memory-snapshot.pickle', help='Name for memory profile output file (only used with --memory-profiling)')
     
     args = parser.parse_args()
+
+    # Add DTYPE_MAP here, right after parsing arguments
+    DTYPE_MAP = {
+        "torch.float16": torch.float16,
+        "torch.bfloat16": torch.bfloat16,
+    }
+    
+    # Convert string to actual dtype
+    mixed_precision_dtype = DTYPE_MAP[args.mixed_precision_dtype]
 
     # Validation (optional - warn if name provided without profiling)
     if args.memory_profile_name != 'memory-snapshot.pickle' and not args.memory_profiling:
@@ -178,6 +194,7 @@ if __name__ == "__main__":
         train_steps=args.train_steps, 
         do_backward=args.backward, 
         use_mixed_precision=args.mixed_precision,
+        mixed_precision_dtype=mixed_precision_dtype,
         do_memory_profiling=args.memory_profiling,
         memory_profile_name=args.memory_profile_name)
 
