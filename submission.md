@@ -75,6 +75,11 @@
         - Conversion overhead is minimal compared to compute speedup
         - Gradients stay float32 to prevent underflow and maintain stability
         - Mixed precision = speed of float16 + stability of float32
+1. Why Backward Pass Speeds Up Despite Being Outside Autocast
+    1. **Stored Activations Are Lower Precision**: During forward pass with autocast, intermediate activations are stored in bfloat16. When backpropagation runs, these stored activations are loaded from memory using half the bandwidth.
+    2. **Memory Bandwidth Benefits**: The reduced memory footprint of activations (2 bytes vs 4 bytes per element) means faster data movement during gradient computation.
+    3. **Tensor Core Utilization**: Many gradient computation steps involve matrix operations with the stored bfloat16 activations, which can still leverage GPU Tensor Cores.
+    4. **Cache Efficiency**: More activation data fits in GPU caches, reducing memory access latency during backprop.
 1. `nullcontext` is useful for conditionally enabling/disabling other context managers
     ```python
     context = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_mixed_precision else nullcontext()
