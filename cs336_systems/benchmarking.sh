@@ -1,9 +1,13 @@
 #!/bin/bash
-output_file=${1:-"benchmark_results.log"} 
+
+# Initialize output file (recreate each time)
+output_file=${1:-"benchmark_results.csv"} 
+echo "size,precision,forward_runs,forward_time_seconds,backward_runs,backward_time_seconds" > "$output_file"
+echo "Benchmarking Results - $(date)"
 
 # 0. combinations to benchmark
 # sizes=("small" "medium" "large" "xl" "2.7b")
-sizes=("small" "medium")
+sizes=("small" "medium" "large")
 precisions=("full" "mixed")
 
 # 1. define a function to run benchmarking
@@ -14,7 +18,7 @@ run_benchmarking() {
     echo "Running benchmark for size=$size, precision=$precision"
     
     # Build command with conditional mixed precision flag
-    local cmd="nsys profile -o report-${size}-${precision} --python-backtrace=cuda --cudabacktrace=all --pytorch=autograd-nvtx python benchmarking_script.py --warmup --backward --size $size"
+    local cmd="nsys profile -o report-${size}-${precision} python benchmarking_script.py --warmup --backward --size $size"
     
     if [ "$precision" == "mixed" ]; then
         cmd="$cmd --mixed-precision"
@@ -33,20 +37,26 @@ run_sql_analysis() {
     local size=$1
     local precision=$2
     
-    echo "Analyzing timing for size=$size, precision=$precision"
-
-    sqlite3 report-${size}-${precision}.sqlite "
-    SELECT 
-        e1.text as range_name,
-        COUNT(*) as count,
-        SUM(e1.end - e1.start) / 1000000000.0 as total_time_seconds
+    # Get backward results (count and total time)
+    local backward_data=$(sqlite3 report-${size}-${precision}.sqlite "
+    SELECT COUNT() || ',' || ROUND(SUM(e1.end - e1.start) / 1000000000.0, 6)
     FROM NVTX_EVENTS e1
     JOIN NVTX_EVENTS e2 ON e1.start >= e2.start AND e1.end <= e2.end
-    WHERE e1.text IN ('Forward Pass', 'Backward Pass')
-      AND e2.text = 'Timing Phase'
-    GROUP BY e1.text
-    ORDER BY e1.text;
-    "
+    WHERE e1.text = 'Backward Pass' 
+      AND e2.text = 'Timing Phase';
+    ")
+    
+    # Get forward results (count and total time)
+    local forward_data=$(sqlite3 report-${size}-${precision}.sqlite "
+    SELECT COUNT() || ',' || ROUND(SUM(e1.end - e1.start) / 1000000000.0, 6)
+    FROM NVTX_EVENTS e1
+    JOIN NVTX_EVENTS e2 ON e1.start >= e2.start AND e1.end <= e2.end
+    WHERE e1.text = 'Forward Pass' 
+      AND e2.text = 'Timing Phase';
+    ")
+    
+    # Return CSV format: size,precision,forward_runs,forward_time,backward_runs,backward_time
+    echo "$size,$precision,$forward_data,$backward_data"
 }
 
 # 3. run benchmarks for all combinations
@@ -56,10 +66,6 @@ echo "========================================"
 
 for size in "${sizes[@]}"; do
     for precision in "${precisions[@]}"; do
-        combination="${size}-${precision}"
-        echo ""
-        echo "=== Benchmarking: $size model with $precision precision ==="
-        
         # Write combination header to file
         # echo "[$combination] Starting benchmark..." >> "$output_file"
         
@@ -72,17 +78,11 @@ for size in "${sizes[@]}"; do
             result=$(run_sql_analysis $size $precision)
             
             # Write result to file
-            echo "[$combination] $result" >> "$output_file"
-            echo "[$combination] Status: SUCCESS" >> "$output_file"
+            echo "$result" >> "$output_file"
         else
-            echo "[$combination] Status: FAILED - Benchmarking error" >> "$output_file"
+            echo "Status: FAILED - Benchmarking error" >> "$output_file"
             echo "Error: Benchmarking failed for $size-$precision"
         fi
-        
-        echo "[$combination] Completed" >> "$output_file"
-        echo "" >> "$output_file"
-        
-        # echo "=== Completed: $size-$precision ==="
     done
 done
 
@@ -92,5 +92,5 @@ echo "Results saved to: $output_file"
 
 # Clean up generated files
 echo "Cleaning up temporary files..."
-rm -f report-*.nsys-rep report-*.sqlite
+rm -f report-*.sqlite
 echo "Cleanup completed!"
