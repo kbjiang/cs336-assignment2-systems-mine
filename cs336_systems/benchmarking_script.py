@@ -57,8 +57,6 @@ def annotated_scaled_dot_product_attention(
         output = einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
     return output
 
-cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
-
 @nvtx.range("SwiGLU forward")
 class AnnotatedSwiGLU(cs336_basics.model.SwiGLU):
     def forward(self, x):
@@ -72,7 +70,8 @@ class AnnotatedSwiGLU(cs336_basics.model.SwiGLU):
             with nvtx.range("SwiGLU_w2"):
                 return self.w2(gated)
 
-cs336_basics.model.SwiGLU = AnnotatedSwiGLU
+# cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+# cs336_basics.model.SwiGLU = AnnotatedSwiGLU
 
 def run_test(
     dataset: np.ndarray, 
