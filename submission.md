@@ -12,7 +12,7 @@
     1. run and `export PATH=$PATH:$HOME/nsight-systems/bin`
 1. `nvtx` is very helpful to isolate kernels for different parts of the calculation. To see operations by NVTX phase, 
     1. To get the report, run `nsys profile --python-backtrace=cuda --cudabacktrace=all --pytorch=autograd-nvtx python your_script.py --warmup --backward --mixed-precision` 
-        1. `backtrace` for..., `autograd-nvtx` for...
+        1. `backtrace` for..., `autograd-nvtx` for...; both are optional if only time is needed.
     1. To see by `nvtx` section
         1. CLI: `nsys stats --report cuda_gpu_trace --format table --filter-nvtx "Forward Pass"  report.nsys-rep`
         1. UI: `apply filter` -> `Stats System View` in bottom dropdown -> `CUDA GPU trace`or whatever.
@@ -109,4 +109,20 @@
     # tensor([0.], dtype=torch.float16)
     # tensor([0.0010], dtype=torch.bfloat16)
     ```
+1. Run benchmarking [script](./cs336_systems/benchmarking.sh) and get result. 
+    ```csv
+    size,precision,forward_runs,forward_time_seconds,backward_runs,backward_time_seconds
+    small,full,10,0.317784,10,0.733286
+    small,mixed,10,0.486204,10,0.918253
+    medium,full,10,0.655829,10,1.690529
+    medium,mixed,10,0.962006,10,1.769694
+    large,full,10,0.948486,10,4.092338
+    large,mixed,10,1.330271,10,2.244423
+    xl,full,10,1.766273,10,8.497722
+    xl,mixed,10,1.509672,10,3.65094
+    2.7b,full,10,1.837926,10,13.481286
+    2.7b,mixed,10,0.932135,10,4.093555
+    ```
+    1. Only when model is big enough do the `mixed-precision` show benefits.
+    1. Forward wise, `2.7b-mixed` is faster than `xl-mixed`. Why?
 1. 

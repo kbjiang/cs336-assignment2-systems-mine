@@ -6,8 +6,8 @@ echo "size,precision,forward_runs,forward_time_seconds,backward_runs,backward_ti
 echo "Benchmarking Results - $(date)"
 
 # 0. combinations to benchmark
-# sizes=("small" "medium" "large" "xl" "2.7b")
-sizes=("small" "medium" "large")
+sizes=("small" "medium" "large" "xl" "2.7b")
+# sizes=("small" "medium" "large")
 precisions=("full" "mixed")
 
 # 1. define a function to run benchmarking
