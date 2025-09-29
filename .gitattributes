@@ -1,0 +1,4 @@
+cs336_systems/memory_256_mixed.pickle filter=lfs diff=lfs merge=lfs -text
+cs336_systems/memory_256.pickle filter=lfs diff=lfs merge=lfs -text
+cs336_systems/memory_256_forward.pickle filter=lfs diff=lfs merge=lfs -text
+cs336_systems/memory_256_forward_mixed.pickle filter=lfs diff=lfs merge=lfs -text
