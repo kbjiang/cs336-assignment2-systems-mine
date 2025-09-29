@@ -126,3 +126,18 @@
     1. Only when model is big enough do the `mixed-precision` show benefits.
     1. Forward wise, `2.7b-mixed` is faster than `xl-mixed`. Why?
 1. 
+
+## 1.1.6 Profiling Memory
+### Learnings
+1. Understand `active Memory Timeline`
+    1. Each entry is to be understand as some kernel? Each has a start and an end (releases memory)
+    1. Memories that persist are probably model weights? But why did it not change with `context_length`?
+    1. To start, blow up `memory_256_forward.pickle` and see each entry. You can see the shape of the blocks and details within.
+### Answers
+#### memory_profiling
+1. See the `memory_*pickle` files. 
+1. See following table; this is full precision.
+| ctx.len | forward | full |
+| 128 | 19.3GB | 60.0GB |
+| 256 | 26.0GB | 67.0GB |
+| 512 | 42.8GB | - |
