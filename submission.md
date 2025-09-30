@@ -133,6 +133,9 @@
     1. Each entry is to be understand as some kernel? Each has a start and an end (releases memory)
     1. Memories that persist are probably model weights? But why did it not change with `context_length`?
     1. To start, blow up `memory_256_forward.pickle` and see each entry. You can see the shape of the blocks and details within.
+1. Observations of the memory plot
+    1. zoom in to see the multiple `stairs` of memory, each corresponds to one Transformer block.
+    1. `ffn` requires a lot of memory comparing to `attn`
 ### Answers
 #### memory_profiling
 1. See the `memory_*pickle` files. 
@@ -148,4 +151,4 @@
     | 128 | 24.0GB | 65.0GB |
     | 256 | 28.3GB | 69.0GB |
     | 512 | 39.6GB | - |
-1. d
+    1. The memory profile with mixed precision looked more fragmented and overall 
