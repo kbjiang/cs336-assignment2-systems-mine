@@ -136,8 +136,16 @@
 ### Answers
 #### memory_profiling
 1. See the `memory_*pickle` files. 
-1. See following table; this is full precision.
-| ctx.len | forward | full |
-| 128 | 19.3GB | 60.0GB |
-| 256 | 26.0GB | 67.0GB |
-| 512 | 42.8GB | - |
+1. Table with full precision.
+    | Context Length | Forward | Full |
+    |:--------------:|:--------------:|:-----------:|
+    | 128 | 19.3GB | 60.0GB |
+    | 256 | 26.0GB | 67.0GB |
+    | 512 | 42.8GB | - |
+1. Table with mixed precision.
+    | Context Length | Forward | Full |
+    |:--------------:|:--------------:|:-----------:|
+    | 128 | 24.0GB | 65.0GB |
+    | 256 | 28.3GB | 69.0GB |
+    | 512 | 39.6GB | - |
+1. d
