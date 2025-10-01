@@ -84,6 +84,7 @@ class PytorchAttention(nn.Module):
         
         # Shape: (..., num_heads, sequence_length, d_k)
         attn_output = annotated_scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+        # return attn_output
 
         # Shape: (..., num_heads, sequence_length, vocab_size)
         output = self.lm_head(attn_output)
@@ -114,6 +115,7 @@ def run_test(
     K = torch.randn((batch_size, seq_len, d_model), device=device)
     V = torch.randn((batch_size, seq_len, d_model), device=device)
     y = torch.randint(0, vocab_size, (batch_size, seq_len), device=Q.device)
+    # y = torch.randint(0, d_model, (batch_size, seq_len), device=Q.device)
 
     def forward_step():
         y_hat = model(Q, K, V)
@@ -166,73 +168,65 @@ def run_test(
     
     return forward_total, backward_total
 
-# Add this mapping after your imports
-D_MODELS = [16, 32, 64, 128]
-SEQ_LENS = [256, 1024, 4096, 8192, 16384]
-BATCH_SIZE = 8
-VOCAB_SIZE = 10_000
-WARMUP_STEPS = 5
-TRAIN_STEPS = 1
-DEVICE = "cuda:0"
-BACKWARD = True
-DO_MEMORY_PROFILING = True
-MEMORY_PROFILE_NAME = "memory-snapshot.pickle"
+def parse_args():
+    parser = argparse.ArgumentParser(description="PyTorch Attention Benchmarking")
+    parser.add_argument("--d-model", type=int, default=128)
+    parser.add_argument("--seq-len", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--vocab-size", type=int, default=10_000)
+    parser.add_argument("--warmup-steps", type=int, default=5)
+    parser.add_argument("--train-steps", type=int, default=10)
+    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--backward", action="store_true")
+    parser.add_argument("--memory-profiling", action="store_true")
+    parser.add_argument("--memory-profile_name", type=str, default="memory-snapshot.pickle")
+    return parser.parse_args()
 
 if __name__ == "__main__":
+    args = parse_args()
     
-    results = []
-    # Create cartesian product of D_MODELS and SEQ_LENS
-    for d_model in D_MODELS:
-        for seq_len in SEQ_LENS:
-            # print something to track progress
-            print(f"Current combination: d_model={d_model}, seq_len={seq_len}")
-            model = PytorchAttention(d_model, VOCAB_SIZE).to(DEVICE)
-            optimizer = AdamW(model.parameters())
+    model = PytorchAttention(args.d_model, args.vocab_size).to(args.device)
+    # model.compile()
+    optimizer = AdamW(model.parameters())
+    
+    try:
+        forward_time, backward_time = run_test(
+            model=model, 
+            d_model=args.d_model,
+            seq_len=args.seq_len, 
+            vocab_size=args.vocab_size, 
+            optimizer=optimizer, 
+            batch_size=args.batch_size,
+            warmup_steps=args.warmup_steps,
+            train_steps=args.train_steps,
+            do_backward=args.backward, 
+            device=args.device,
+            do_memory_profiling=args.memory_profiling,
+            memory_profile_name=args.memory_profile_name,
+        )
+
+        result = {
+            "d_model": args.d_model,
+            "seq_len": args.seq_len,
+            "batch_size": args.batch_size,
+            "backward": args.backward,
+            "forward_time": round(forward_time, 4),
+            "backward_time": round(backward_time, 4) if args.backward else None,
+            "total_time": round(forward_time + backward_time, 4),
+            "status": "success"
+        }
         
-            try:
-                forward_time, backward_time = run_test(
-                    model=model, 
-                    d_model=d_model,
-                    seq_len=seq_len, 
-                    vocab_size=VOCAB_SIZE, 
-                    optimizer=optimizer, 
-                    batch_size=BATCH_SIZE,
-                    warmup_steps=WARMUP_STEPS,
-                    train_steps=TRAIN_STEPS,
-                    do_backward=BACKWARD, 
-                    device=DEVICE,
-                    do_memory_profiling=DO_MEMORY_PROFILING,
-                    memory_profile_name=MEMORY_PROFILE_NAME,
-                )
+    except torch.OutOfMemoryError:
+        result = {
+            "d_model": args.d_model,
+            "seq_len": args.seq_len,
+            "batch_size": args.batch_size,
+            "backward": args.backward,
+            "forward_time": None,
+            "backward_time": None,
+            "total_time": None,
+            "status": "OOM"
+        }
 
-                result = {
-                    "backward": BACKWARD,
-                    "d_model": d_model,
-                    "seq_len": seq_len,
-                    "forward_time": round(forward_time, 4),
-                    "backward_time": round(backward_time, 4) if BACKWARD else None,
-                    "total_time": round(forward_time + backward_time, 4),
-                    "status": "success"
-                }
-            except torch.OutOfMemoryError:
-                # assign something for OOM cases
-                result = {
-                    "backward": BACKWARD,
-                    "d_model": d_model,
-                    "seq_len": seq_len,
-                    "forward_time": None,
-                    "backward_time": None,
-                    "total_time": None,
-                    "status": "OOM"
-                }
-
-            finally:
-                results.append(result)
-
-    # save to local .jsonl file
-    with open("pytorch_attention_results.jsonl", "a") as f:
-        for result in results:
-            f.write(json.dumps(result) + "\n")
-    
-    print(f"Results saved to pytorch_attention_results.jsonl")
+    print(json.dumps(result))
     

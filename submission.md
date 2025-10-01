@@ -153,5 +153,6 @@
     | 512 | 39.6GB | - |
 1. 5, 10, 20 MBs for context lengths 128, 256, 512 respectively.
     1. Corresponding line: `cs336_basics/model.py:385:forward`, which is `ffn_sublayer_output = attn_sublayer_output + x_ffn`.
+    1. 4 seqs/batch x 128 toks/seq x 2560 floats/tok x 4 bytes/float = 5 MB
 1. The largest allocations are those corresponds to `FFN`.
 
