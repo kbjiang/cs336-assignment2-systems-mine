@@ -145,10 +145,13 @@
     | 128 | 19.3GB | 60.0GB |
     | 256 | 26.0GB | 67.0GB |
     | 512 | 42.8GB | - |
-1. Table with mixed precision.
+1. Table with mixed precision. The memory profile with mixed precision looked more fragmented. Why?
     | Context Length | Forward | Full |
     |:--------------:|:--------------:|:-----------:|
     | 128 | 24.0GB | 65.0GB |
     | 256 | 28.3GB | 69.0GB |
     | 512 | 39.6GB | - |
-    1. The memory profile with mixed precision looked more fragmented and overall 
+1. 5, 10, 20 MBs for context lengths 128, 256, 512 respectively.
+    1. Corresponding line: `cs336_basics/model.py:385:forward`, which is `ffn_sublayer_output = attn_sublayer_output + x_ffn`.
+1. The largest allocations are those corresponds to `FFN`.
+
