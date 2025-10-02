@@ -1,4 +1,5 @@
 ## 1.1.3 End-to-End Benchmarking
+### Learnings
 ### Answers
 1. see `cs336_systems/benchmarking_script.py` 
 1. No significant deviation 
@@ -156,3 +157,32 @@
     1. 4 seqs/batch x 128 toks/seq x 2560 floats/tok x 4 bytes/float = 5 MB
 1. The largest allocations are those corresponds to `FFN`.
 
+
+## 1.2.1 Benchmarking PyTorch Attention
+### Learnings
+### Ansers
+#### pytorch_attention
+1. Timing 100 forward/backward. 
+    |    |   d_model |   seq_len |   batch_size | backward   |   forward_time |   backward_time |   total_time | status   |
+    |---:|----------:|----------:|-------------:|:-----------|---------------:|----------------:|-------------:|:---------|
+    |  0 |        16 |       256 |            8 | True       |         0.1012 |          0.1371 |       0.2383 | success  |
+    |  1 |        16 |      1024 |            8 | True       |         0.2941 |          0.4229 |       0.7171 | success  |
+    |  2 |        16 |      4096 |            8 | True       |         1.5719 |          1.5144 |       3.0863 | success  |
+    |  3 |        16 |      8192 |            8 | True       |         4.4004 |          2.9757 |       7.3761 | success  |
+    |  4 |        16 |     16384 |            8 | True       |        13.9563 |          5.8925 |      19.8488 | success  |
+    |  5 |        32 |       256 |            8 | True       |         0.101  |          0.1372 |       0.2382 | success  |
+    |  6 |        32 |      1024 |            8 | True       |         0.3067 |          0.427  |       0.7337 | success  |
+    |  7 |        32 |      4096 |            8 | True       |         1.641  |          1.5514 |       3.1924 | success  |
+    |  8 |        32 |      8192 |            8 | True       |         4.5796 |          2.958  |       7.5375 | success  |
+    |  9 |        32 |     16384 |            8 | True       |        14.4986 |          5.8994 |      20.398  | success  |
+    | 10 |        64 |       256 |            8 | True       |         0.1123 |          0.1452 |       0.2575 | success  |
+    | 11 |        64 |      1024 |            8 | True       |         0.3375 |          0.441  |       0.7784 | success  |
+    | 12 |        64 |      4096 |            8 | True       |         1.8024 |          1.6438 |       3.4462 | success  |
+    | 13 |        64 |      8192 |            8 | True       |         4.9855 |          3.2003 |       8.1858 | success  |
+    | 14 |        64 |     16384 |            8 | True       |        15.6728 |          6.3461 |      22.0189 | success  |
+    | 15 |       128 |       256 |            8 | True       |         0.1377 |          0.1716 |       0.3093 | success  |
+    | 16 |       128 |      1024 |            8 | True       |         0.404  |          0.518  |       0.922  | success  |
+    | 17 |       128 |      4096 |            8 | True       |         2.1052 |          1.8568 |       3.9619 | success  |
+    | 18 |       128 |      8192 |            8 | True       |         5.7687 |          3.6539 |       9.4226 | success  |
+    | 19 |       128 |     16384 |            8 | True       |        17.9237 |          7.2563 |      25.1799 | success  |
+1. Run `pytorch pytorch_attention.py --memory-profiling --train-steps --d-model 128 --seq-len 16384 1 ...`. 
