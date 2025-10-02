@@ -6,7 +6,7 @@ import json
 import math
 
 import cs336_basics
-from cs336_basics.model import BasicsTransformerLM, silu, Linear
+from cs336_basics.model import BasicsTransformerLM, silu, Linear, scaled_dot_product_attention
 from cs336_basics.data import get_batch
 from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy, softmax
@@ -18,45 +18,6 @@ from torch import Tensor
 from jaxtyping import Float, Bool
 from contextlib import nullcontext
 from types import SimpleNamespace
-
-@nvtx.range("scaled dot production attention")
-def annotated_scaled_dot_product_attention(
-    Q: Float[Tensor, " ... queries d_k"],
-    K: Float[Tensor, " ... keys    d_k"],
-    V: Float[Tensor, " ... keys    d_v"],
-    mask: Bool[Tensor, " ... queries keys"] | None = None,
-) -> Float[Tensor, " ... queries d_v"]:
-    """Scaled dot-product attention.
-
-    This function implements Eq. 1 of the Transformer paper.
-
-    Args:
-        Q: Tensor of queries, may have any number of leading dimensions.
-        K: Tensor of keys, sharing leading dimensions with Q.
-        V: Tensor of values, sharding leading dimensions with Q and K.
-        mask: An (optional) mask of shape (..., seq_len, seq_len).
-            Attention scores for positions with a mask value of `False` should
-            be masked out, i.e., not affect the softmaxed attention probabilities.
-
-    Returns:
-        torch.FloatTensor of shape (..., seq_len, value_dimension)
-        with the output of running your scaled dot product attention
-        implementation with the provided key, query, and value tensors.
-    """
-
-    with nvtx.range("computing attention score"):
-        d_k = K.shape[-1]
-        attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
-
-        if mask is not None:
-            attention_scores = torch.where(mask, attention_scores, float("-inf"))
-
-    with nvtx.range("computing softmax"):
-        attention_weights = softmax(attention_scores, dim=-1)  # Softmax over the key dimension
-
-    with nvtx.range("final matmul"):
-        output = einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
-    return output
 
 class PytorchAttention(nn.Module):
     """Single-Head Self-Attention
@@ -83,7 +44,7 @@ class PytorchAttention(nn.Module):
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=Q.device)).bool()
         
         # Shape: (..., num_heads, sequence_length, d_k)
-        attn_output = annotated_scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+        attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
         # return attn_output
 
         # Shape: (..., num_heads, sequence_length, vocab_size)
@@ -142,26 +103,25 @@ def run_test(
     forward_times = []
     backward_times = []
     
+    if do_memory_profiling:
+        # Start recording memory history
+        torch.cuda.memory._record_memory_history(max_entries=1000_000)
     for _ in range(train_steps):
         # Time forward pass
         forward_time = timeit.timeit(lambda: forward_step(), number=1)
         forward_times.append(forward_time)
         
         if do_backward:
-            if do_memory_profiling:
-                # Start recording memory history
-                torch.cuda.memory._record_memory_history(max_entries=1000_000)
-    
             # For backward timing, we need the loss from forward pass
             y_hat, loss = forward_step()
             backward_time = timeit.timeit(lambda: backward_step(loss), number=1)
             backward_times.append(backward_time)
 
-            if do_memory_profiling:
-                # Save a pickle file to be loaded by PyTorch's online tool.
-                torch.cuda.memory._dump_snapshot(memory_profile_name)
-                # Stop recording history
-                torch.cuda.memory._record_memory_history(enabled=None)
+    if do_memory_profiling:
+        # Save a pickle file to be loaded by PyTorch's online tool.
+        torch.cuda.memory._dump_snapshot(memory_profile_name)
+        # Stop recording history
+        torch.cuda.memory._record_memory_history(enabled=None)
 
     forward_total = np.sum(forward_times).item()
     backward_total = np.sum(backward_times).item() if do_backward else 0.0
@@ -175,18 +135,18 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--vocab-size", type=int, default=10_000)
     parser.add_argument("--warmup-steps", type=int, default=5)
-    parser.add_argument("--train-steps", type=int, default=10)
+    parser.add_argument("--train-steps", type=int, default=100)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--backward", action="store_true")
     parser.add_argument("--memory-profiling", action="store_true")
-    parser.add_argument("--memory-profile_name", type=str, default="memory-snapshot.pickle")
+    parser.add_argument("--memory-profile-name", type=str, default="memory-snapshot.pickle")
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
     
     model = PytorchAttention(args.d_model, args.vocab_size).to(args.device)
-    # model.compile()
+    model.compile()
     optimizer = AdamW(model.parameters())
     
     try:

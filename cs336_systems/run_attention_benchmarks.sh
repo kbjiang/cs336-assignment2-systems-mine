@@ -17,7 +17,7 @@ echo "Running attention benchmarks..."
 for d_model in "${D_MODELS[@]}"; do
     for seq_len in "${SEQ_LENS[@]}"; do
         echo "Testing d_model=$d_model, seq_len=$seq_len"
-        python pytorch_attention.py --d_model $d_model --seq_len $seq_len --backward >> $OUTPUT_FILE
+        python pytorch_attention.py --d-model $d_model --seq-len $seq_len --backward >> $OUTPUT_FILE
     done
 done
 
