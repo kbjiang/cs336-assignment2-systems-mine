@@ -12,12 +12,17 @@ OUTPUT_FILE="pytorch_attention_results.jsonl"
 D_MODELS=(16 32 64 128)
 SEQ_LENS=(256 1024 4096 8192 16384)
 
+# sizes=("small" "medium" "large" "xl" "2.7b")
+sizes=("small" "medium")
+precisions=("full" "mixed")
+
+
 echo "Running attention benchmarks..."
 
 for d_model in "${D_MODELS[@]}"; do
     for seq_len in "${SEQ_LENS[@]}"; do
         echo "Testing d_model=$d_model, seq_len=$seq_len"
-        python pytorch_attention.py --d-model $d_model --seq-len $seq_len --backward >> $OUTPUT_FILE
+        python pytorch_attention.py --d-model $d_model --seq-len $seq_len --backward --compile >> $OUTPUT_FILE
     done
 done
 

@@ -91,20 +91,28 @@ def run_test(
         dataset, batch_size, context_length, "cuda" 
     )
 
+    def forward_step():
+        y_hat = model(x)
+        loss = cross_entropy(y_hat, y)
+        torch.cuda.synchronize()
+        return loss
+
+    def backward_step(loss):
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        torch.cuda.synchronize()
+
     # `nullcontext` to control mixed precision or not
     precision_context = torch.autocast(device_type="cuda", dtype=mixed_precision_dtype) if use_mixed_precision else nullcontext()
     def train_step():
         with nvtx.range("Forward Pass"):
             with precision_context:
-                y_hat = model(x)
-                loss = cross_entropy(y_hat, y)
+                loss = forward_step()
         if do_backward:
             with nvtx.range("Backward Pass"):
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                backward_step(loss)
 
-        torch.cuda.synchronize()
 
     # Warmup steps
     with nvtx.range("Warmup Phase"):
@@ -114,12 +122,22 @@ def run_test(
     if do_memory_profiling:
         # Start recording memory history
         torch.cuda.memory._record_memory_history(max_entries=1000_000)
-    # Timed steps
-    elapses = []
+    # Timed steps - separate timing for forward and backward
+    forward_times = []
+    backward_times = []
     with nvtx.range("Timing Phase"):
         for _ in range(train_steps):
-            elapsed = timeit.timeit(train_step, number=1)
-            elapses.append(elapsed)
+            # Time forward pass
+            forward_time = timeit.timeit(lambda: forward_step(), number=1)
+            forward_times.append(forward_time)
+
+            if do_backward:
+                # For backward timing, we need the loss from forward pass
+                loss = forward_step()
+                backward_time = timeit.timeit(lambda: backward_step(loss), number=1)
+                backward_times.append(backward_time)
+            else:
+                backward_times.append(0.0)
 
     if do_memory_profiling:
         # Savea pickle file to be loaded by PyTorch's online tool.
@@ -127,7 +145,7 @@ def run_test(
         # Stop recording history
         torch.cuda.memory._record_memory_history(enabled=None)
 
-    return np.mean(elapses).item(), np.std(elapses).item()
+    return np.mean(forward_times).item(), np.std(forward_times).item(), np.mean(backward_times).item(), np.std(backward_times).item(), 
 
 # Add this mapping after your imports
 MODEL_CONFIGS = {
@@ -165,6 +183,7 @@ if __name__ == "__main__":
     parser.add_argument('--train-steps', type=int, default=10, help='Number of training steps to time')
     parser.add_argument('--warmup', action='store_true', help='If passed, do warmup.')
     parser.add_argument('--backward', action='store_true', help='If passed, do backward pass')
+    parser.add_argument('--compile', action='store_true', help='If passed, do JIT compilation')
     parser.add_argument('--mixed-precision', action='store_true', help='If passed, use mixed precision')
     parser.add_argument('--mixed-precision-dtype', default='bfloat16', help='Mixed precision dtype')
     parser.add_argument('--memory-profiling', action='store_true', help='If passed, do memory profiling')
@@ -201,11 +220,13 @@ if __name__ == "__main__":
         rope_theta=args.rope_theta,
     )
     model.to("cuda:0")
+    if args.compile:
+        model.compile()
     
     optimizer = AdamW(model.parameters())
     dataset = np.random.randint(0, args.vocab_size, 1024)
     
-    elapsed_mean, elapsed_std = run_test(
+    forward_mean, forward_std, backward_mean, backward_std = run_test(
         dataset=dataset, 
         model=model, 
         optimizer=optimizer, 
@@ -223,12 +244,15 @@ if __name__ == "__main__":
         "num_steps": args.train_steps,
         "warmup": args.warmup,
         "backward": args.backward,
+        "compile": args.compile,
         "d_model": config.d_model,
         "d_off": config.d_ff,
         "num_layers": config.num_layers,
         "num_heads": config.num_heads,
-        "elapsed_mean": round(elapsed_mean, 4),
-        "elapsed_std": round(elapsed_std, 4),
+        "forward_mean": round(forward_mean, 4),
+        "forward_std": round(forward_std, 4),
+        "backward_mean": round(backward_mean, 4),
+        "backward_std": round(backward_std, 4),
     }
 
     print(json.dumps(result))

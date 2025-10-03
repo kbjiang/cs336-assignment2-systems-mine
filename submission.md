@@ -187,5 +187,49 @@
     | 18 |       128 |      8192 |            8 | True       |         5.7687 |          3.6539 |       9.4226 | success  |
     | 19 |       128 |     16384 |            8 | True       |        17.9237 |          7.2563 |      25.1799 | success  |
 1. Run `pytorch pytorch_attention.py --memory-profiling --train-steps 1 --d-model 128 --seq-len 16384 --backward --compile --memory-profile-name something.pickle` to get the memory profile.
-    1. the `attention_scores` requires big chunk of memory when `seq-len` is big; long sequence is the bottleneck.
+    1. the `attention_scores` requires big chunk of memory, up to 8GB, when `seq-len` is big; long sequence is the bottleneck.
     1. the memory saved for backward seems to be linear with sequence length.
+
+## 1.3 Benchmarking JIT-Compiled Attention
+### Learnings
+### Ansers
+#### torch_compile
+1. Timing 100 forward/backward (JIT-compiled) 
+    |    |   d_model |   seq_len |   batch_size | backward   |   forward_time |   backward_time |   total_time | status   |
+    |---:|----------:|----------:|-------------:|:-----------|---------------:|----------------:|-------------:|:---------|
+    |  0 |        16 |       256 |            8 | True       |         0.0906 |          0.1542 |       0.2448 | success  |
+    |  1 |        16 |      1024 |            8 | True       |         0.268  |          0.4256 |       0.6936 | success  |
+    |  2 |        16 |      4096 |            8 | True       |         1.2183 |          1.5116 |       2.7298 | success  |
+    |  3 |        16 |      8192 |            8 | True       |         2.9427 |          2.9663 |       5.909  | success  |
+    |  4 |        16 |     16384 |            8 | True       |         8.3247 |          5.8856 |      14.2103 | success  |
+    |  5 |        32 |       256 |            8 | True       |         0.0918 |          0.1418 |       0.2336 | success  |
+    |  6 |        32 |      1024 |            8 | True       |         0.2829 |          0.4234 |       0.7063 | success  |
+    |  7 |        32 |      4096 |            8 | True       |         1.288  |          1.5435 |       2.8315 | success  |
+    |  8 |        32 |      8192 |            8 | True       |         3.1297 |          2.969  |       6.0986 | success  |
+    |  9 |        32 |     16384 |            8 | True       |         8.8675 |          5.8897 |      14.7572 | success  |
+    | 10 |        64 |       256 |            8 | True       |         0.1018 |          0.1574 |       0.2592 | success  |
+    | 11 |        64 |      1024 |            8 | True       |         0.3139 |          0.4535 |       0.7675 | success  |
+    | 12 |        64 |      4096 |            8 | True       |         1.4416 |          1.6397 |       3.0813 | success  |
+    | 13 |        64 |      8192 |            8 | True       |         3.536  |          3.1987 |       6.7347 | success  |
+    | 14 |        64 |     16384 |            8 | True       |        10.0435 |          6.3318 |      16.3753 | success  |
+    | 15 |       128 |       256 |            8 | True       |         0.1142 |          0.1687 |       0.2829 | success  |
+    | 16 |       128 |      1024 |            8 | True       |         0.3769 |          0.5186 |       0.8955 | success  |
+    | 17 |       128 |      4096 |            8 | True       |         1.7529 |          1.8669 |       3.6198 | success  |
+    | 18 |       128 |      8192 |            8 | True       |         4.3211 |          3.6537 |       7.9748 | success  |
+    | 19 |       128 |     16384 |            8 | True       |        12.295  |          7.2433 |      19.5383 | success  |
+    1. Comparing to non-compiled table, the improvement is in `forward_time`.
+    1. with longer context length, the advantage of compilation is more obvious.
+1. E2E timings
+    |    |   num_steps | compile   |   d_model |   d_off |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |
+    |---:|------------:|:----------|----------:|--------:|-------------:|------------:|---------------:|--------------:|----------------:|---------------:|
+    |  0 |          10 | False     |       768 |    3072 |           12 |          12 |         0.0256 |        0.0008 |          0.0557 |         0.0005 |
+    |  1 |          10 | True      |       768 |    3072 |           12 |          12 |         0.0183 |        0.0001 |          0.0498 |         0.0004 |
+    |  2 |          10 | False     |      1024 |    4096 |           24 |          16 |         0.0672 |        0.0005 |          0.1702 |         0.0003 |
+    |  3 |          10 | True      |      1024 |    4096 |           24 |          16 |         0.0563 |        0.0002 |          0.1549 |         0.0004 |
+    |  4 |          10 | False     |      1280 |    5120 |           36 |          20 |         0.1438 |        0.0008 |          0.3756 |         0.0005 |
+    |  5 |          10 | True      |      1280 |    5120 |           36 |          20 |         0.1256 |        0.0003 |          0.3474 |         0.0003 |
+    |  6 |          10 | False     |      1600 |    6400 |           48 |          25 |         0.2827 |        0.0004 |          0.7676 |         0.001  |
+    |  7 |          10 | True      |      1600 |    6400 |           48 |          25 |         0.2551 |        0.0002 |          0.7201 |         0.0006 |
+    |  8 |          10 | False     |      2560 |   10240 |           32 |          32 |         0.4174 |        0.0004 |          1.1791 |         0.0007 |
+    |  9 |          10 | True      |      2560 |   10240 |           32 |          32 |         0.393  |        0.0001 |          1.1333 |         0.0004 |
+    1. less improvement when e2e.
