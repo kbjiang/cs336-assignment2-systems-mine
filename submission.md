@@ -131,7 +131,8 @@
 ## 1.1.6 Profiling Memory
 ### Learnings
 1. Understand `active Memory Timeline`
-    1. Each entry is to be understand as some kernel? Each has a start and an end (releases memory)
+    1. Each entry is to be understand as the resultant *tensor* of some operation. Each has a start and an end (releases memory)
+        1. E.g., `output = self.lm_head(attn_output)` the memory of `output` should be `batch_size * seq_len * vocab_size * 4 bytes`.
     1. Memories that persist are probably model weights? But why did it not change with `context_length`?
     1. To start, blow up `memory_256_forward.pickle` and see each entry. You can see the shape of the blocks and details within.
 1. Observations of the memory plot
@@ -185,4 +186,6 @@
     | 17 |       128 |      4096 |            8 | True       |         2.1052 |          1.8568 |       3.9619 | success  |
     | 18 |       128 |      8192 |            8 | True       |         5.7687 |          3.6539 |       9.4226 | success  |
     | 19 |       128 |     16384 |            8 | True       |        17.9237 |          7.2563 |      25.1799 | success  |
-1. Run `pytorch pytorch_attention.py --memory-profiling --train-steps --d-model 128 --seq-len 16384 1 ...`. 
+1. Run `pytorch pytorch_attention.py --memory-profiling --train-steps 1 --d-model 128 --seq-len 16384 --backward --compile --memory-profile-name something.pickle` to get the memory profile.
+    1. the `attention_scores` requires big chunk of memory when `seq-len` is big; long sequence is the bottleneck.
+    1. the memory saved for backward seems to be linear with sequence length.

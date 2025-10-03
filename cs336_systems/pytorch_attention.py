@@ -6,7 +6,7 @@ import json
 import math
 
 import cs336_basics
-from cs336_basics.model import BasicsTransformerLM, silu, Linear, scaled_dot_product_attention
+from cs336_basics.model import BasicsTransformerLM, silu, Linear
 from cs336_basics.data import get_batch
 from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy, softmax
@@ -18,6 +18,42 @@ from torch import Tensor
 from jaxtyping import Float, Bool
 from contextlib import nullcontext
 from types import SimpleNamespace
+
+def scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys    d_k"],
+    V: Float[Tensor, " ... keys    d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    """Scaled dot-product attention.
+
+    This function implements Eq. 1 of the Transformer paper.
+
+    Args:
+        Q: Tensor of queries, may have any number of leading dimensions.
+        K: Tensor of keys, sharing leading dimensions with Q.
+        V: Tensor of values, sharding leading dimensions with Q and K.
+        mask: An (optional) mask of shape (..., seq_len, seq_len).
+            Attention scores for positions with a mask value of `False` should
+            be masked out, i.e., not affect the softmaxed attention probabilities.
+
+    Returns:
+        torch.FloatTensor of shape (..., seq_len, value_dimension)
+        with the output of running your scaled dot product attention
+        implementation with the provided key, query, and value tensors.
+    """
+
+    d_k = K.shape[-1]
+    attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
+
+    if mask is not None:
+        attention_scores = torch.where(mask, attention_scores, float("-inf"))
+
+    attention_weights = softmax(attention_scores, dim=-1)  # Softmax over the key dimension
+
+    output = einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
+    return output
+
 
 class PytorchAttention(nn.Module):
     """Single-Head Self-Attention
@@ -41,7 +77,9 @@ class PytorchAttention(nn.Module):
 
     def forward(self, Q, K, V) -> Float[Tensor, " ... seq d_v"]:
         seq_len = Q.shape[-2]  # Get actual sequence length from input
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=Q.device)).bool()
+        causal_mask = torch.ones(seq_len, seq_len, device=Q.device)
+        causal_mask = torch.tril(causal_mask)
+        causal_mask = causal_mask.bool()
         
         # Shape: (..., num_heads, sequence_length, d_k)
         attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
@@ -138,6 +176,7 @@ def parse_args():
     parser.add_argument("--train-steps", type=int, default=100)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--backward", action="store_true")
+    parser.add_argument("--compile", action="store_true")
     parser.add_argument("--memory-profiling", action="store_true")
     parser.add_argument("--memory-profile-name", type=str, default="memory-snapshot.pickle")
     return parser.parse_args()
@@ -146,7 +185,8 @@ if __name__ == "__main__":
     args = parse_args()
     
     model = PytorchAttention(args.d_model, args.vocab_size).to(args.device)
-    model.compile()
+    if args.compile:
+        model.compile()
     optimizer = AdamW(model.parameters())
     
     try:
