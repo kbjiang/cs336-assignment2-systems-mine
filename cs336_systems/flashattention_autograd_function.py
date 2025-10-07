@@ -1,5 +1,8 @@
 import torch
-from einops import einsum
+import math
+import triton
+import triton.language as tl
+from einops import einsum, rearrange
 
 class FlashAttentionAutogradFunctionPytorch(torch.autograd.Function):
     @staticmethod
@@ -207,7 +210,9 @@ class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
             ctx.K_TILE_SIZE,
         )
 
-        return O.view(Q_input_shape)
+        ctx.save_for_backward(Q, K, V, L, O)
+        O = O.view(Q_input_shape).contiguous()
+        return O
     def backward(ctx):
         raise NotImplementedError
     
