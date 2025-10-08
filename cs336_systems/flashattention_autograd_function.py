@@ -59,6 +59,7 @@ def flash_fwd_kernel(
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr,
 ):
     # program indices
     query_tile_index = tl.program_id(0)
@@ -113,20 +114,25 @@ def flash_fwd_kernel(
 
     O_block = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
     L_block = tl.zeros((Q_TILE_SIZE, ), dtype=tl.float32)
+    
     m = tl.full((Q_TILE_SIZE,), float('-inf'), dtype=tl.float32)
     Q_block = tl.load(Q_block_ptr, boundary_check=(0,), padding_option='zero')
+
+    # create causal mask
+    row_indices = tl.arange(0, Q_TILE_SIZE)
+    col_indices = tl.arange(0, K_TILE_SIZE)
+    causal_mask = col_indices[None, :] > row_indices[:, None]
+
 
     for i in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
         K_block = tl.load(K_block_ptr, boundary_check=(0,), padding_option='zero')
         V_block = tl.load(V_block_ptr, boundary_check=(0,), padding_option='zero')
-        # K_block = tl.load(K_block_ptr)
-        # V_block = tl.load(V_block_ptr)
-
-        # tl.device_print("V", V_block)
 
         # `allow_tf32=False` is important
         # https://github.com/triton-lang/triton/issues/1840
         S = scale * tl.dot(Q_block, tl.trans(K_block), allow_tf32=False)
+        if is_causal:
+            S = tl.where(causal_mask, S, float('-inf'))
 
         m_curr = tl.maximum(m, tl.max(S, axis=-1))
 
@@ -134,6 +140,7 @@ def flash_fwd_kernel(
 
         alpha = tl.exp(m - m_curr)
         L_block = alpha * L_block  + tl.sum(P, axis=-1)
+
         # according to Claude, tl does not have `diag` so need to use broadcasting
         O_block = alpha[:, None] * O_block
         # using `acc` for `tl.float32`
@@ -165,6 +172,7 @@ class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
         V = rearrange(V, "... d -> (...) d")
 
         ctx.save_for_backward(Q, K, V)
+        ctx.is_causal = is_causal
 
         for t in [Q, K, V]:
             assert t.is_cuda, "Expected CUDA tensors"
@@ -176,7 +184,7 @@ class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
         ctx.K_input_shape = K_input_shape
 
         O = torch.empty(Q.shape, device=Q.device)
-        L = torch.zeros(Q.shape[:-1], device=Q.device)
+        L = torch.zeros(batch_size * n_queries, device=Q.device)
 
         stride_qb = n_queries * D
         stride_qq = D
@@ -190,7 +198,7 @@ class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
         stride_ob = stride_qb
         stride_oq = stride_qq
         stride_od = 1
-        stride_lb = Q_input_shape[0]
+        stride_lb = n_queries
         stride_lq = 1
         scale = 1 / (D ** 0.5)
          
@@ -208,12 +216,12 @@ class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
             scale, D,
             ctx.Q_TILE_SIZE,
             ctx.K_TILE_SIZE,
+            is_causal,
         )
 
-        ctx.save_for_backward(Q, K, V, L, O)
         O = O.view(Q_input_shape).contiguous()
+        L = L.view(batch_size, n_queries).contiguous()
+        ctx.save_for_backward(Q, K, V, L, O)
         return O
     def backward(ctx):
         raise NotImplementedError
-    
-        
