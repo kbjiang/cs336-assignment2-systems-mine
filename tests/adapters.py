@@ -17,7 +17,8 @@ def get_flashattention_autograd_function_pytorch() -> Type:
     """
     # For example: return MyFlashAttnAutogradFunctionClass
     # raise NotImplementedError
-    from cs336_systems.flashattention_autograd_function import FlashAttentionAutogradFunctionPytorch
+    # from cs336_systems.flashattention_autograd_function import FlashAttentionAutogradFunctionPytorch
+    from cs336_systems.flashattention_autograd_function_compiled import FlashAttentionAutogradFunctionPytorch
     return FlashAttentionAutogradFunctionPytorch
 
 
@@ -36,7 +37,8 @@ def get_flashattention_autograd_function_triton() -> Type:
     """
     # For example: return MyTritonFlashAttentionAutogradFunctionClass
     # raise NotImplementedError
-    from cs336_systems.flashattention_autograd_function import FlashAttentionAutogradFunctionTriton
+    # from cs336_systems.flashattention_autograd_function import FlashAttentionAutogradFunctionTriton
+    from cs336_systems.flashattention_autograd_function_compiled import FlashAttentionAutogradFunctionTriton
     return FlashAttentionAutogradFunctionTriton
 
 

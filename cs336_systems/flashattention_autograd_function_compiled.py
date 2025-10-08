@@ -4,6 +4,36 @@ import triton
 import triton.language as tl
 from einops import einsum, rearrange
 
+# Compiled backward computation functions
+@torch.compile
+def _compute_backward_pytorch(Q, K, V, L, O, dO, D):
+    """Compiled core backward computation for PyTorch implementation"""
+    DD = torch.sum(O * dO, axis=-1)
+    S = einsum(Q, K, "... q d, ... k d -> ... q k") / D ** 0.5
+    P = torch.exp(S - L[:, :, None])
+    dV = einsum(P, dO, "... q k, ... q d -> ... k d")
+    dP = einsum(dO, V, "... q d, ... k d -> ... q k")
+    dS = P * (dP - DD[:, :, None])
+    dQ = einsum(dS, K, "... q k, ... k d -> ... q d") / D ** 0.5
+    dK = einsum(dS, Q, "... q k, ... q d -> ... k d") / D ** 0.5
+    return dQ, dK, dV
+
+@torch.compile
+def _compute_backward_triton(Q, K, V, L, O, dO, D, is_causal, n_queries, n_keys):
+    """Compiled core backward computation for Triton implementation"""
+    DD = torch.sum(O * dO, axis=-1)
+    S = einsum(Q, K, "... q d, ... k d -> ... q k") / D ** 0.5
+    if is_causal:
+        causal_mask = torch.arange(n_queries, device=S.device)[:, None] >= torch.arange(n_keys, device=S.device)[None, :]
+        S = torch.where(causal_mask.to(S.device), S, -1e6)
+    P = torch.exp(S - L[:, :, None])
+    dV = einsum(P, dO, "... q k, ... q d -> ... k d")
+    dP = einsum(dO, V, "... q d, ... k d -> ... q k")
+    dS = P * (dP - DD[:, :, None])
+    dQ = einsum(dS, K, "... q k, ... k d -> ... q d") / D ** 0.5
+    dK = einsum(dS, Q, "... q k, ... q d -> ... k d") / D ** 0.5
+    return dQ, dK, dV
+
 class FlashAttentionAutogradFunctionPytorch(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False):
@@ -48,16 +78,9 @@ class FlashAttentionAutogradFunctionPytorch(torch.autograd.Function):
     def backward(ctx, dO):
         Q, K, V, L, O = ctx.saved_tensors
         _, n_queries, D = Q.shape
-        _, n_keys, _ = K.shape
-        DD = torch.sum(O * dO, axis=-1)
-        S = einsum(Q, K, "... q d, ... k d -> ... q k") / D ** 0.5
-        P = torch.exp(S - L[:, :, None])
-        dV = einsum(P, dO, "... q k, ... q d -> ... k d")
-        dP = einsum(dO, V, "... q d, ... k d -> ... q k")
-        dS = P * (dP - DD[:, :, None])
-        dQ = einsum(dS, K, "... q k, ... k d -> ... q d") / D ** 0.5
-        dK = einsum(dS, Q, "... q k, ... q d -> ... k d") / D ** 0.5
-        return dQ, dK, dV, None        
+        # Use compiled backward computation
+        dQ, dK, dV = _compute_backward_pytorch(Q, K, V, L, O, dO, D)
+        return dQ, dK, dV, None
 
 # reshape to 2D, but block size is still seq_len * d_model
 @triton.jit
@@ -247,15 +270,6 @@ class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
         Q, K, V, L, O = ctx.saved_tensors
         _, n_queries, D = Q.shape
         _, n_keys, _ = K.shape
-        DD = torch.sum(O * dO, axis=-1)
-        S = einsum(Q, K, "... q d, ... k d -> ... q k") / D ** 0.5
-        if ctx.is_causal:
-            causal_mask = torch.arange(n_queries, device=S.device)[:, None] >= torch.arange(n_keys, device=S.device)[None, :]
-            S = torch.where(causal_mask.to(S.device), S, -1e6)
-        P = torch.exp(S - L[:, :, None])
-        dV = einsum(P, dO, "... q k, ... q d -> ... k d")
-        dP = einsum(dO, V, "... q d, ... k d -> ... q k")
-        dS = P * (dP - DD[:, :, None])
-        dQ = einsum(dS, K, "... q k, ... k d -> ... q d") / D ** 0.5
-        dK = einsum(dS, Q, "... q k, ... q d -> ... k d") / D ** 0.5
+        # Use compiled backward computation
+        dQ, dK, dV = _compute_backward_triton(Q, K, V, L, O, dO, D, ctx.is_causal, n_queries, n_keys)
         return dQ, dK, dV, None
