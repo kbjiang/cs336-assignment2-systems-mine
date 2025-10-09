@@ -177,10 +177,12 @@ def flash_fwd_kernel(
         order=(0,),
     )
 
+    # on chip computation buffers with dtype `tl.float32`;
+    # should not confuse with input dtype
     O_block = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
     L_block = tl.zeros((Q_TILE_SIZE, ), dtype=tl.float32)
-    
     m = tl.full((Q_TILE_SIZE,), float('-inf'), dtype=tl.float32)
+
     Q_block = tl.load(Q_block_ptr, boundary_check=(0,), padding_option='zero')
 
     # Create offset indices for queries for causal masking
@@ -227,8 +229,9 @@ def flash_fwd_kernel(
     O_block = (1 / L_block)[:, None] * O_block
     L_block = m + tl.log(L_block)
 
-    tl.store(O_block_ptr, O_block, boundary_check=(0,))
-    tl.store(L_block_ptr, L_block, boundary_check=(0,))
+    # when store, ensure the final output matches the input precision
+    tl.store(O_block_ptr, O_block.to(Q_block.dtype), boundary_check=(0,))
+    tl.store(L_block_ptr, L_block.to(Q_block.dtype), boundary_check=(0,))
 
 class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
     @staticmethod
@@ -256,8 +259,9 @@ class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
         ctx.Q_input_shape = Q_input_shape
         ctx.K_input_shape = K_input_shape
 
-        O = torch.empty(Q.shape, device=Q.device)
-        L = torch.zeros(batch_size * n_queries, device=Q.device)
+        # Host-side tensor uses input dtype
+        O = torch.empty(Q.shape, device=Q.device, dtype=Q.dtype)
+        L = torch.zeros(batch_size * n_queries, device=Q.device, dtype=Q.dtype)
 
         stride_qb = n_queries * D
         stride_qq = D

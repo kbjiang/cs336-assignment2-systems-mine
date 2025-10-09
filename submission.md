@@ -233,3 +233,11 @@
     |  8 |          10 | False     |      2560 |   10240 |           32 |          32 |         0.4174 |        0.0004 |          1.1791 |         0.0007 |
     |  9 |          10 | True      |      2560 |   10240 |           32 |          32 |         0.393  |        0.0001 |          1.1333 |         0.0004 |
     1. less improvement when e2e.
+
+
+1. `torch` should automatically take care of the precision basing on input precision
+1. `triton`
+    1. on chip buffers ($O_i$, l, m) should be `tl.float32` and use `acc` with `tl.dot`.
+    1. map output to input precision when storing back to memory
+1. `triton.autotune`
+1. peak memory? why not much memory difference?
