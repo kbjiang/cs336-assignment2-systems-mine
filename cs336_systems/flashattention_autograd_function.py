@@ -58,27 +58,31 @@ class FlashAttentionAutogradFunctionPytorch(torch.autograd.Function):
             m_i = torch.full((batch_size, B_q), float('-inf'), device=device)
             Q_indices = torch.arange(i, i+B_q, device=device)
             for j in range(0, N_k, B_k):
-                K_j = K[:, j:j+B_k, :]
-                V_j = V[:, j:j+B_k, :]
-                S_j = 1 / d**(0.5) * einsum(Q_i, K_j, '... B_q d, ... B_k d -> ... B_q B_k')
-                if is_causal:
-                    # nice trick to get a triangular mask
-                    K_indices = torch.arange(j, j+B_k, device=device)
-                    causal_mask = K_indices[None, :] <= Q_indices[:, None]
-                    S_j = torch.where(causal_mask, S_j, -1e6)
-                # assert S_j.shape == (batch_size, B_q, B_k)
+                # if all falls inside the masked out area, no calculation needed
+                if is_causal and j > i + B_q -1:
+                    continue
+                else:
+                    K_j = K[:, j:j+B_k, :]
+                    V_j = V[:, j:j+B_k, :]
+                    S_j = 1 / d**(0.5) * einsum(Q_i, K_j, '... B_q d, ... B_k d -> ... B_q B_k')
+                    if is_causal:
+                        # nice trick to get a triangular mask
+                        K_indices = torch.arange(j, j+B_k, device=device)
+                        causal_mask = K_indices[None, :] <= Q_indices[:, None]
+                        S_j = torch.where(causal_mask, S_j, -1e6)
+                    # assert S_j.shape == (batch_size, B_q, B_k)
 
-                m_curr = torch.max(torch.cat([m_i[:, :, None], S_j], axis=-1), axis=-1).values
-                P_i = torch.exp(S_j - m_curr[:, :, None])
-                # assert P_i.shape == (batch_size, B_q, B_k)
+                    m_curr = torch.max(torch.cat([m_i[:, :, None], S_j], axis=-1), axis=-1).values
+                    P_i = torch.exp(S_j - m_curr[:, :, None])
+                    # assert P_i.shape == (batch_size, B_q, B_k)
 
-                l_i = torch.exp(m_i - m_curr)*l_i + torch.sum(P_i, axis=-1)
-                
-                _ = torch.diag_embed(torch.exp(m_i - m_curr))
-                O_i = einsum(_, O_i, '... B_q B_q, ... B_q d -> ... B_q d') + einsum(P_i, V_j, '... B_q B_k, ... B_k d -> ... B_q d')
-                # assert O_i.shape == (batch_size, B_q, d)
+                    l_i = torch.exp(m_i - m_curr)*l_i + torch.sum(P_i, axis=-1)
+                    
+                    _ = torch.diag_embed(torch.exp(m_i - m_curr))
+                    O_i = einsum(_, O_i, '... B_q B_q, ... B_q d -> ... B_q d') + einsum(P_i, V_j, '... B_q B_k, ... B_k d -> ... B_q d')
+                    # assert O_i.shape == (batch_size, B_q, d)
 
-                m_i = m_curr
+                    m_i = m_curr
             O_i = einsum(torch.diag_embed(1 / l_i), O_i, '... B_q B_q, ... B_q d -> ... B_q d')
             L_i = m_i + torch.log(l_i)
 
@@ -180,36 +184,43 @@ def flash_fwd_kernel(
     Q_block = tl.load(Q_block_ptr, boundary_check=(0,), padding_option='zero')
 
     # Create offset indices for queries for causal masking
+    q_end = query_tile_index * Q_TILE_SIZE + Q_TILE_SIZE - 1
     q_indices = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
     for i in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
-        K_block = tl.load(K_block_ptr, boundary_check=(0,), padding_option='zero')
-        V_block = tl.load(V_block_ptr, boundary_check=(0,), padding_option='zero')
+        # if all falls inside the masked out area, no calculation needed
+        k_start = i * K_TILE_SIZE
+        if is_causal and (k_start > q_end):
+            # Skip computation for this tile
+            pass
+        else:
+            K_block = tl.load(K_block_ptr, boundary_check=(0,), padding_option='zero')
+            V_block = tl.load(V_block_ptr, boundary_check=(0,), padding_option='zero')
 
-        # `allow_tf32=False` is important
-        # https://github.com/triton-lang/triton/issues/1840
-        S = scale * tl.dot(Q_block, tl.trans(K_block), allow_tf32=False)
+            # `allow_tf32=False` is important
+            # https://github.com/triton-lang/triton/issues/1840
+            S = scale * tl.dot(Q_block, tl.trans(K_block), allow_tf32=False)
 
-        if is_causal:
-            # nice trick to get a triangular mask
-            k_indices = i * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
-            causal_mask = k_indices[None, :] <= q_indices[:, None]
-            S = tl.where(causal_mask, S, -1e6)
-            # tl.device_print("S", S)
+            if is_causal:
+                # nice trick to get a triangular mask
+                k_indices = i * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+                causal_mask = k_indices[None, :] <= q_indices[:, None]
+                S = tl.where(causal_mask, S, -1e6)
+                # tl.device_print("S", S)
 
-        m_curr = tl.maximum(m, tl.max(S, axis=-1))
+            m_curr = tl.maximum(m, tl.max(S, axis=-1))
 
-        P = tl.exp(S - m_curr.expand_dims(axis=-1))
+            P = tl.exp(S - m_curr.expand_dims(axis=-1))
 
-        alpha = tl.exp(m - m_curr)
-        L_block = alpha * L_block  + tl.sum(P, axis=-1)
+            alpha = tl.exp(m - m_curr)
+            L_block = alpha * L_block  + tl.sum(P, axis=-1)
 
-        # according to Claude, tl does not have `diag` so need to use broadcasting
-        O_block = alpha[:, None] * O_block
-        # using `acc` for `tl.float32`
-        O_block = tl.dot(P.to(V_block.dtype), V_block, acc=O_block, allow_tf32=False)
-        m = m_curr
+            # according to Claude, tl does not have `diag` so need to use broadcasting
+            O_block = alpha[:, None] * O_block
+            # using `acc` for `tl.float32`
+            O_block = tl.dot(P.to(V_block.dtype), V_block, acc=O_block, allow_tf32=False)
+            m = m_curr
 
-        # Move the pointer to next tile
+        # Move the pointer to next tile (always executed)
         K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
         V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
 
