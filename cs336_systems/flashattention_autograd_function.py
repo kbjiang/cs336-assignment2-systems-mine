@@ -4,6 +4,43 @@ import triton
 import triton.language as tl
 from einops import einsum, rearrange
 
+class AttentionAutogradFunctionPytorch(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, Q, K, V, is_causal=False, B_q=16, B_k=16):
+        n_queries = Q.shape[-2]
+        n_keys = K.shape[-2]
+        D = Q.shape[-1]
+        scale = 1 / (D ** 0.5)
+        S = einsum(Q, K, '... q d, ... k d -> ... q k') * scale
+        if is_causal:
+            causal_mask = torch.arange(n_queries, device=S.device)[None, :, None] >= torch.arange(n_keys, device=S.device)[None, None, :]
+            S = torch.where(causal_mask, S, -1e6)
+        P = torch.softmax(S, dim=-1)
+        O = einsum(P, V, '... q k, ... k d -> ... q d')
+        ctx.save_for_backward(Q, K, V, P, O)
+        ctx.is_causal = is_causal
+        return O
+    @staticmethod
+    def backward(ctx, dO):
+        Q, K, V, P, O = ctx.saved_tensors
+        D = Q.shape[-1]
+        scale = 1 / (D ** 0.5)
+        dV = einsum(P, dO, '... q k, ... q d -> ... k d')
+        dP = einsum(dO, V, '... q d, ... k d -> ... q k')
+        DD = torch.sum(O * dO, axis=-1)
+        dS = P * (dP - DD[:, :, None])
+        # Do not need masking here coz we are not recomputing
+        # n_queries = Q.shape[-2]
+        # n_keys = K.shape[-2]
+        # if ctx.is_causal:
+        #     causal_mask = torch.arange(n_queries, device=dS.device)[:, None] >= torch.arange(n_keys, device=dS.device)[None, :]
+        #     dS = torch.where(causal_mask, dS, -1e6)
+
+        dQ = einsum(dS, K, '... q k, ... k d -> ... q d') * scale
+        dK = einsum(dS, Q, '... q k, ... q d -> ... k d') * scale
+        return dQ, dK, dV, None, None, None
+
+
 class FlashAttentionAutogradFunctionPytorch(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False, B_q=16, B_k=16):
@@ -48,6 +85,7 @@ class FlashAttentionAutogradFunctionPytorch(torch.autograd.Function):
             O[:, i:i+B_q] += O_i
             L[:, i:i+B_q] += L_i
         ctx.save_for_backward(Q, K, V, L, O)
+        ctx.is_causal = is_causal
         return O
 
     @staticmethod
@@ -57,13 +95,16 @@ class FlashAttentionAutogradFunctionPytorch(torch.autograd.Function):
         _, n_keys, _ = K.shape
         DD = torch.sum(O * dO, axis=-1)
         S = einsum(Q, K, "... q d, ... k d -> ... q k") / D ** 0.5
+        if ctx.is_causal:
+            causal_mask = torch.arange(n_queries, device=S.device)[:, None] >= torch.arange(n_keys, device=S.device)[None, :]
+            S = torch.where(causal_mask.to(S.device), S, -1e6)
         P = torch.exp(S - L[:, :, None])
         dV = einsum(P, dO, "... q k, ... q d -> ... k d")
         dP = einsum(dO, V, "... q d, ... k d -> ... q k")
         dS = P * (dP - DD[:, :, None])
         dQ = einsum(dS, K, "... q k, ... k d -> ... q d") / D ** 0.5
         dK = einsum(dS, Q, "... q k, ... q d -> ... k d") / D ** 0.5
-        return dQ, dK, dV, None, None, None        
+        return dQ, dK, dV, None, None, None
 
 # reshape to 2D, but block size is still seq_len * d_model
 @triton.jit
