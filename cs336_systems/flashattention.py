@@ -321,3 +321,81 @@ class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
         dQ = einsum(dS, K, "... q k, ... k d -> ... q d") / D ** 0.5
         dK = einsum(dS, Q, "... q k, ... q d -> ... k d") / D ** 0.5
         return dQ, dK, dV, None, None, None
+
+
+# for benchmarking
+class FlashAttention2:
+    def __init__(self, impl, B_q=16, B_k=16):
+        self.impl = impl
+        self.B_q = B_q
+        self.B_k = B_k
+    
+    def __call__(self, Q, K, V, is_causal=True):
+        return self.impl.apply(Q, K, V, is_causal, self.B_q, self.B_k)
+
+def test_timing_flash_forward_backward(test, impl, n_heads, d_head, sequence_length, dtype=torch.bfloat16, device='cuda', B_q=16, B_k=16, track_memory=False):
+    q, k, v = torch.randn(
+        3, n_heads, sequence_length, d_head, device=device, dtype=dtype, requires_grad=True
+    )
+    
+    flash = torch.compile(FlashAttention2(impl, B_q, B_k))
+    # sanity check; it would fail without compiling if precision in triton is not implemented right
+    # flash = FlashAttention2(impl, B_q, B_k)
+    
+    def flash_forward():
+        o = flash(q, k, v, True)
+
+    def flash_forward_backward():
+        o = flash(q, k, v, True)
+        loss = o.sum()
+        loss.backward()
+
+    # Clear cache and reset peak memory stats before benchmarking
+    if track_memory:
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+        
+        # Get initial memory state
+        initial_memory = torch.cuda.memory_allocated(device)
+
+    if test == "forward":
+        results = triton.testing.do_bench(flash_forward, rep=1000, warmup=1000)
+    elif test == "forward_backward":
+        results = triton.testing.do_bench(flash_forward_backward, rep=1000, warmup=1000)
+    else:
+        raise ValueError("Wrong selection.")
+    
+    if track_memory:
+        # Get peak memory usage during benchmarking
+        peak_memory = torch.cuda.max_memory_allocated(device)
+        peak_memory_mb = peak_memory / 1024 / 1024
+        initial_memory_mb = initial_memory / 1024 / 1024
+        
+        print(f"Timing results: {results} ms")
+        print(f"Initial memory: {initial_memory_mb:.2f} MB")
+        print(f"Peak memory: {peak_memory_mb:.2f} MB") 
+        print(f"Peak memory increase: {peak_memory_mb - initial_memory_mb:.2f} MB")
+        
+        return results, peak_memory_mb
+    else:
+        print(results)
+        return results
+
+if __name__ == "__main__":
+    print("=== FlashAttention Benchmarking with Memory Tracking ===")
+    
+    # Test forward pass with memory tracking
+    print("\n--- Forward Pass Only ---")
+    test_timing_flash_forward_backward("forward", FlashAttentionAutogradFunctionTriton, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
+    
+    # Test forward + backward pass with memory tracking  
+    print("\n--- Forward + Backward Pass ---")
+    test_timing_flash_forward_backward("forward_backward", FlashAttentionAutogradFunctionTriton, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
+    
+    # Compare with PyTorch implementation
+    print("\n--- PyTorch Implementation (Forward Only) ---") 
+    test_timing_flash_forward_backward("forward", AttentionAutogradFunctionPytorch, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
+
+    # Compare with PyTorch implementation
+    print("\n--- Forward + Backward Pass ---")
+    test_timing_flash_forward_backward("forward_backward", AttentionAutogradFunctionPytorch, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
