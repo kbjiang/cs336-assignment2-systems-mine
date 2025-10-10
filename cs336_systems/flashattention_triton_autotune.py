@@ -136,7 +136,7 @@ def flash_fwd_kernel(
     tl.store(O_block_ptr, O_block.to(Q_block.dtype), boundary_check=(0,))
     tl.store(L_block_ptr, L_block.to(Q_block.dtype), boundary_check=(0,))
 
-class FlashAttentionAutogradFunctionTritonAutotune(torch.autograd.Function):
+class FlashAttentionTritonAutotune(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False):
         # cache Q, K and V?
@@ -144,24 +144,16 @@ class FlashAttentionAutogradFunctionTritonAutotune(torch.autograd.Function):
         _, n_keys, _ = K.shape
 
         # reshape input tensor to 2D, i.e., remove batch dim
-        Q_input_shape = Q.shape
-        Q = rearrange(Q, "... d -> (...) d")
-        K_input_shape = K.shape
-        K = rearrange(K, "... d -> (...) d")
-        V = rearrange(V, "... d -> (...) d")
+        Q_2d = rearrange(Q, "... d -> (...) d")
+        K_2d = rearrange(K, "... d -> (...) d")
+        V_2d = rearrange(V, "... d -> (...) d")
 
-        ctx.save_for_backward(Q, K, V)
-        ctx.is_causal = is_causal
-
-        for t in [Q, K, V]:
+        for t in [Q_2d, K_2d, V_2d]:
             assert t.is_cuda, "Expected CUDA tensors"
             assert t.is_contiguous(), "Our pointer arithmetic will assume contiguous inputs"
 
-        ctx.Q_input_shape = Q_input_shape
-        ctx.K_input_shape = K_input_shape
-
         # Host-side tensor uses input dtype
-        O = torch.empty(Q.shape, device=Q.device, dtype=Q.dtype)
+        O = torch.empty(Q_2d.shape, device=Q.device, dtype=Q.dtype)
         L = torch.zeros(batch_size * n_queries, device=Q.device, dtype=Q.dtype)
 
         stride_qb = n_queries * D
@@ -186,7 +178,7 @@ class FlashAttentionAutogradFunctionTritonAutotune(torch.autograd.Function):
             return (math.ceil(n_queries / meta['Q_TILE_SIZE']), batch_size)
         
         flash_fwd_kernel[grid](
-            Q, K, V, O, L,
+            Q_2d, K_2d, V_2d, O, L,
             stride_qb, stride_qq, stride_qd,
             stride_kb, stride_kk, stride_kd,
             stride_vb, stride_vk, stride_vd,
@@ -197,12 +189,15 @@ class FlashAttentionAutogradFunctionTritonAutotune(torch.autograd.Function):
             is_causal,
         )
 
-        O = O.view(Q_input_shape).contiguous()
-        Q = Q.view(Q_input_shape).contiguous()
-        K = K.view(K_input_shape).contiguous()
-        V = V.view(K_input_shape).contiguous()
-        L = L.view(batch_size, n_queries).contiguous()
+        Q = rearrange(Q_2d, "(b q) d -> b q d", b=batch_size)
+        K = rearrange(K_2d, "(b k) d -> b k d", b=batch_size)
+        V = rearrange(V_2d, "(b k) d -> b k d", b=batch_size)
+        O = rearrange(O, "(b q) d -> b q d", b=batch_size)
+        L = rearrange(L, "(b q) -> b q", b=batch_size)
+
         ctx.save_for_backward(Q, K, V, L, O)
+        ctx.is_causal = is_causal
+
         return O
     
     @staticmethod
@@ -235,7 +230,7 @@ def get_autotuned_config(n_heads, d_head, sequence_length, dtype=torch.bfloat16,
     )
     
     # Trigger autotuning by running the kernel once
-    flash = FlashAttentionAutogradFunctionTritonAutotune.apply
+    flash = FlashAttentionTritonAutotune.apply
     _ = flash(q, k, v, True)
     
     # Access the best config from the autotuned kernel
@@ -265,9 +260,9 @@ def test_timing_flash_forward_backward(
     )
     
     # For autotuned version, use the function directly since tile sizes are auto-determined
-    flash = torch.compile(FlashAttentionAutogradFunctionTritonAutotune.apply)
+    flash = torch.compile(FlashAttentionTritonAutotune.apply)
     # sanity check; it would fail without compiling if precision in triton is not implemented right
-    # flash = FlashAttentionAutogradFunctionTritonAutotune.apply
+    # flash = FlashAttentionTritonAutotune.apply
     
     def flash_forward():
         o = flash(q, k, v, True)

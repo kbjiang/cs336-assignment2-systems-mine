@@ -241,3 +241,150 @@
     1. map output to input precision when storing back to memory
 1. `triton.autotune`
 1. peak memory? why not much memory difference?
+1. From a performance perspective, compiling the backward recomputation either (A) inside the module (compile the recompute function and call it from the autograd backward) or (B) by compiling the wrapper that calls your autograd Function (e.g. `torch.compile(FlashAttention2(...))`) will yield very similar runtime performance after the first call.
+
+
+1. Issues with Algorithm 2:
+    1. dQ loading issue: You're correct - the algorithm shows "Load Q_i, O_i, dO_i, dQ_i from global memory" but dQ hasn't been initialized yet. This appears to be an error in the algorithm description.
+    1. P computed twice: The algorithm doesn't explicitly show P being computed twice. The text mentions computing P twice (once for dQ, once for dK/dV), but the algorithm as written seems to compute everything in one pass.
+    1. Why is this not a problem with forward pass?
+1. Corrected Algorithm 2: Tiled FlashAttention-2 backward pass
+    ```
+    Input: Q, O, dO ∈ R^(N_q×d), K, V ∈ R^(N_k×d), L ∈ R^(N_q), tile sizes B_q, B_k
+    Compute D = rowsum(dO ⊙ O) ∈ R^(N_q)
+    Split Q, O, dO into T_q = ⌈N_q/B_q⌉ tiles Q_1,...,Q_Tq, O_1,...,O_Tq, dO_1,...,dO_Tq, each of size B_q × d
+    Split K, V into T_k = ⌈N_k/B_k⌉ tiles K^(1),...,K^(Tk) and V^(1),...,V^(Tk), each of size B_k × d
+    Split L, D into T_q tiles L_1,...,L_Tq and D_1,...,D_Tq, each of size B_q
+
+    Initialize dQ, dK, dV to zeros in global memory
+
+    # Option 1: Single pass with atomics (what Algorithm 2 seems to suggest)
+    for j = 1,...,T_k do
+        Load K^(j), V^(j) from global memory
+        Initialize dK^(j) = dV^(j) = 0 ∈ R^(B_k×d) in SRAM
+        
+        for i = 1,...,T_q do
+            Load Q_i, O_i, dO_i from global memory
+            Load L_i, D_i from global memory
+            
+            # Recompute attention scores for this tile
+            Compute tile of attention scores S_i^(j) = (Q_i(K^(j))^T) / √d ∈ R^(B_q×B_k)
+            
+            # Recompute attention probabilities (avoiding softmax)
+            Compute attention probabilities P_i^(j) = exp(S_i^(j) - L_i) ∈ R^(B_q×B_k)
+            
+            # Compute gradients
+            Compute dV^(j) += (P_i^(j))^T dO_i ∈ R^(B_k×d)
+            Compute dP_i^(j) = dO_i V_j^T ∈ R^(B_q×B_k)
+            Compute dS_i^(j) = P_i^(j) ⊙ (dP_i^(j) - D_i) / √d ∈ R^(B_q×B_k)
+            
+            # Accumulate dQ (requires atomic add since multiple j's write to same dQ_i)
+            Load dQ_i from global memory (or initialize to 0 on first j)
+            Compute dQ_i += dS_i^(j) K^(j) ∈ R^(B_q×d)
+            Store dQ_i back to global memory with atomic add
+            
+            # Accumulate dK for this j
+            Compute dK^(j) += (dS_i^(j))^T Q_i ∈ R^(B_k×d)
+        end for
+        
+        Write dK^(j) and dV^(j) to global memory as the j-th tiles of dK and dV
+    end for
+
+    Return dQ, dK, dV
+
+    # Option 2: Two passes (more practical, avoids atomics)
+
+    Pass 1: Compute dQ
+    Initialize dQ = 0 in global memory
+    for i = 1,...,T_q do
+        Load Q_i, O_i, dO_i, L_i, D_i from global memory
+        Initialize dQ_i = 0 in SRAM
+        
+        for j = 1,...,T_k do
+            Load K^(j), V^(j) from global memory
+            Compute S_i^(j) = (Q_i(K^(j))^T) / √d
+            Compute P_i^(j) = exp(S_i^(j) - L_i)
+            Compute dP_i^(j) = dO_i V_j^T
+            Compute dS_i^(j) = P_i^(j) ⊙ (dP_i^(j) - D_i) / √d
+            Accumulate dQ_i += dS_i^(j) K^(j)
+        end for
+        
+        Write dQ_i to global memory
+    end for
+
+    Pass 2: Compute dK and dV
+    for j = 1,...,T_k do
+        Load K^(j), V^(j) from global memory
+        Initialize dK^(j) = dV^(j) = 0 in SRAM
+        
+        for i = 1,...,T_q do
+            Load Q_i, O_i, dO_i, L_i, D_i from global memory
+            Compute S_i^(j) = (Q_i(K^(j))^T) / √d
+            Compute P_i^(j) = exp(S_i^(j) - L_i)
+            Accumulate dV^(j) += (P_i^(j))^T dO_i
+            Compute dP_i^(j) = dO_i V_j^T
+            Compute dS_i^(j) = P_i^(j) ⊙ (dP_i^(j) - D_i) / √d
+            Accumulate dK^(j) += (dS_i^(j))^T Q_i
+        end for
+        
+        Write dK^(j) and dV^(j) to global memory
+    end for
+    ```
+
+# FlashAttention-2 Backward Pass: Algorithm Clarification and Atomic Operations
+
+## Algorithm 2 Issues and Corrections
+
+### The Problem with Algorithm 2 as Written
+1. **Uninitialized dQ Loading**: The algorithm shows "Load Q_i, O_i, dO_i, dQ_i from global memory" but dQ hasn't been initialized yet. This is an error - dQ should either be initialized to zeros or the algorithm should clarify it's accumulating.
+
+2. **Unclear about "Computing P Twice"**: The text mentions computing P twice (once for dQ, once for dK/dV) but the algorithm doesn't clearly show this separation.
+
+3. **Race Condition**: The single-pass approach has multiple thread blocks trying to update the same dQ tiles, creating a race condition.
+
+## The Atomic Operations Challenge
+
+### Why Atomics are Needed in Single-Pass
+In the single-pass version of Algorithm 2:
+- **Outer loop**: Iterates over K/V tiles (j = 1 to T_k)  
+- **Inner loop**: Iterates over Q tiles (i = 1 to T_q)
+- **Problem**: Every K/V tile (different j values) needs to update ALL Q tiles
+
+Example with 4 tiles:
+- j=1 (K tile 1): Updates dQ_1, dQ_2, dQ_3, dQ_4
+- j=2 (K tile 2): Also updates dQ_1, dQ_2, dQ_3, dQ_4  
+- j=3 (K tile 3): Also updates dQ_1, dQ_2, dQ_3, dQ_4
+- Result: Race condition - multiple thread blocks writing to same memory
+
+### Why Atomics Kill Performance
+1. **Serialization**: Atomic operations force sequential access to memory locations
+2. **Memory bottleneck**: GPUs are designed for parallel memory access; atomics break this
+3. **Contention**: More thread blocks competing for same memory = more waiting
+
+## The Two-Pass Solution (Recommended)
+
+### Pass 1: Compute dQ
+- Each thread block handles ONE Q tile across ALL K tiles
+- Thread block i computes complete dQ_i by iterating through all j
+- **No atomics needed**: Only one block writes to each dQ_i
+
+### Pass 2: Compute dK and dV  
+- Each thread block handles ONE K/V tile across ALL Q tiles
+- Thread block j computes complete dK_j, dV_j by iterating through all i
+- **No atomics needed**: Only one block writes to each dK_j, dV_j
+
+### Benefits of Two-Pass Approach
+1. **No synchronization overhead**: Each memory location written by exactly one thread block
+2. **Better memory access patterns**: Coalesced reads/writes without contention
+3. **Simpler implementation**: No need for atomic operations or complex synchronization
+4. **Better performance**: Typically much faster than atomic-based single pass
+
+## Key Insight
+The "compute P twice" mentioned in the text refers to recomputing P in both passes:
+- Once when computing dQ (Pass 1)
+- Once when computing dK/dV (Pass 2)
+
+This recomputation is worth it because:
+1. Avoids storing large P matrix (would require O(N²) memory)
+2. Eliminates atomic operations (massive performance win)
+3. P computation is fast compared to atomic serialization overhead

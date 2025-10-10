@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 from einops import einsum, rearrange
 
-class AttentionAutogradFunctionPytorch(torch.autograd.Function):
+class AttentionPytorch(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False, B_q=16, B_k=16):
         n_queries = Q.shape[-2]
@@ -41,7 +41,7 @@ class AttentionAutogradFunctionPytorch(torch.autograd.Function):
         return dQ, dK, dV, None, None, None
 
 
-class FlashAttentionAutogradFunctionPytorch(torch.autograd.Function):
+class FlashAttentionPytorch(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False, B_q=16, B_k=16):
         device = Q.device
@@ -233,7 +233,7 @@ def flash_fwd_kernel(
     tl.store(O_block_ptr, O_block.to(Q_block.dtype), boundary_check=(0,))
     tl.store(L_block_ptr, L_block.to(Q_block.dtype), boundary_check=(0,))
 
-class FlashAttentionAutogradFunctionTriton(torch.autograd.Function):
+class FlashAttentionTriton(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False, B_q=16, B_k=16):
         # cache Q, K and V?
@@ -386,16 +386,16 @@ if __name__ == "__main__":
     
     # Test forward pass with memory tracking
     print("\n--- Forward Pass Only ---")
-    test_timing_flash_forward_backward("forward", FlashAttentionAutogradFunctionTriton, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
+    test_timing_flash_forward_backward("forward", FlashAttentionTriton, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
     
     # Test forward + backward pass with memory tracking  
     print("\n--- Forward + Backward Pass ---")
-    test_timing_flash_forward_backward("forward_backward", FlashAttentionAutogradFunctionTriton, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
+    test_timing_flash_forward_backward("forward_backward", FlashAttentionTriton, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
     
     # Compare with PyTorch implementation
     print("\n--- PyTorch Implementation (Forward Only) ---") 
-    test_timing_flash_forward_backward("forward", AttentionAutogradFunctionPytorch, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
+    test_timing_flash_forward_backward("forward", AttentionPytorch, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
 
     # Compare with PyTorch implementation
     print("\n--- Forward + Backward Pass ---")
-    test_timing_flash_forward_backward("forward_backward", AttentionAutogradFunctionPytorch, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)
+    test_timing_flash_forward_backward("forward_backward", AttentionPytorch, 16, 128, 4096, dtype=torch.bfloat16, track_memory=True)

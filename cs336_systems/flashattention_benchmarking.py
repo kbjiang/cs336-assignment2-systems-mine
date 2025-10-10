@@ -1,14 +1,15 @@
 import json
 import torch
 import triton
-from cs336_systems.flashattention import AttentionAutogradFunctionPytorch as NoFlashTorch
-from cs336_systems.flashattention_triton_autotune import FlashAttentionAutogradFunctionTritonAutotune as FlashTritonAuto
+from cs336_systems.flashattention import AttentionPytorch as NoFlashTorch
+# from cs336_systems.flashattention_triton_autotune import FlashAttentionTritonAutotune as FlashTritonAuto
+from cs336_systems.flashattention_triton_optimized import FlashAttentionTritonOptimized as FlashTriton
 import itertools
 from tqdm.auto import tqdm
 
 IMPL_DICT = {
     "NoFlashTorch": NoFlashTorch, 
-    "TritonAutotune": FlashTritonAuto,
+    "Triton": FlashTriton,
 }
 
 def benchmark_flash(
@@ -22,7 +23,7 @@ def benchmark_flash(
     impl = IMPL_DICT[impl_name]
     flash = torch.compile(impl.apply)
     # sanity check; it would fail without compiling if precision in triton is not implemented right
-    # flash = FlashAttentionAutogradFunctionTritonAutotune.apply
+    # flash = FlashAttentionTritonAutotune.apply
     
     def flash_forward():
         o = flash(q, k, v, True)
@@ -68,10 +69,10 @@ def benchmark_flash(
 
 
 if __name__ == "__main__":
-    output_file = "flash_benchmarking.jsonl"
+    output_file = "flashattention_benchmarking.jsonl"
 
     tests = ["forward", "forward_backward"]
-    dtypes = [torch.float32, torch.bfloat16]
+    dtypes = [torch.bfloat16, torch.float32]
     n_heads = 1
     d_heads = [2**n for n in range(4, 8)]
     seq_lens = [2**n for n in range(7, 17)]
