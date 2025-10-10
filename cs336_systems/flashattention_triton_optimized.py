@@ -2,17 +2,18 @@ import torch
 import math
 import triton
 import triton.language as tl
-from einops import einsum, rearrange
+from einops import rearrange
 
-# Forward pass kernel with autotune
+AUTOTUNE_CONFIG=[
+    triton.Config({'Q_TILE_SIZE': 16, 'K_TILE_SIZE': 16}, num_stages=4, num_warps=4),
+    triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 64}, num_stages=4, num_warps=4),
+    triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 64}, num_stages=4, num_warps=8),
+    triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8),
+    triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8),
+]
+
 @triton.autotune(
-    configs=[
-        triton.Config({'Q_TILE_SIZE': 16, 'K_TILE_SIZE': 16}, num_stages=4, num_warps=4),
-        triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 64}, num_stages=4, num_warps=4),
-        triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 64}, num_stages=4, num_warps=8),
-        triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8),
-        triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8),
-    ],
+    configs=AUTOTUNE_CONFIG,
     key=['N_QUERIES', 'N_KEYS', 'D'],
 )
 @triton.jit
@@ -111,6 +112,7 @@ def flash_fwd_kernel(
                 k_indices = i * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
                 causal_mask = k_indices[None, :] <= q_indices[:, None]
                 S = tl.where(causal_mask, S, -1e6)
+                # tl.device_print("S", S)
 
             m_curr = tl.maximum(m, tl.max(S, axis=-1))
 
@@ -136,17 +138,8 @@ def flash_fwd_kernel(
     tl.store(O_block_ptr, O_block.to(Q_block.dtype), boundary_check=(0,))
     tl.store(L_block_ptr, L_block.to(Q_block.dtype), boundary_check=(0,))
 
-
-# Backward pass kernel for dQ with autotune
-
 @triton.autotune(
-    configs=[
-        triton.Config({'Q_TILE_SIZE': 16, 'K_TILE_SIZE': 16}, num_stages=4, num_warps=4),
-        triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 64}, num_stages=4, num_warps=4),
-        triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 64}, num_stages=4, num_warps=8),
-        triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8),
-        triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8),
-    ],
+    configs=AUTOTUNE_CONFIG,
     key=['N_QUERIES', 'N_KEYS', 'D'],
 )
 @triton.jit
@@ -162,9 +155,9 @@ def flash_bwd_dq_kernel(
     N_QUERIES, N_KEYS,
     scale,
     D: tl.constexpr,
-    Q_TILE_SIZE: tl.constexpr,
-    K_TILE_SIZE: tl.constexpr,
     is_causal: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,  # when using autotune, the tile sizes need to be at the end.
+    K_TILE_SIZE: tl.constexpr,
 ):
     """Pass 1: Compute dQ - each block handles one Q tile across all K tiles"""
     query_tile_index = tl.program_id(0)
@@ -299,15 +292,8 @@ def flash_bwd_dq_kernel(
     tl.store(dQ_block_ptr, dQ_block.to(Q_block.dtype), boundary_check=(0,))
 
 
-# Backward pass kernel for dK and dV with autotune
 @triton.autotune(
-    configs=[
-        triton.Config({'Q_TILE_SIZE': 16, 'K_TILE_SIZE': 16}, num_stages=4, num_warps=4),
-        triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 64}, num_stages=4, num_warps=4),
-        triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 64}, num_stages=4, num_warps=8),
-        triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8),
-        triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8),
-    ],
+    configs=AUTOTUNE_CONFIG,
     key=['N_QUERIES', 'N_KEYS', 'D'],
 )
 @triton.jit
@@ -323,9 +309,9 @@ def flash_bwd_dkv_kernel(
     N_QUERIES, N_KEYS,
     scale,
     D: tl.constexpr,
+    is_causal: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
-    is_causal: tl.constexpr,
 ):
     """Pass 2: Compute dK and dV - each block handles one K/V tile across all Q tiles"""
     key_tile_index = tl.program_id(0)
@@ -479,11 +465,11 @@ def flash_bwd_dkv_kernel(
 
 
 class FlashAttentionTritonOptimized(torch.autograd.Function):
-    """FlashAttention with fully autotuned Triton kernels for both forward and backward passes"""
+    """FlashAttention with Triton backward pass (2-pass algorithm)"""
     
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False):
-        # cache Q, K and V for backward pass
+        # cache Q, K and V?
         batch_size, n_queries, D = Q.shape
         _, n_keys, _ = K.shape
 
@@ -516,7 +502,8 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         stride_lq = 1
         scale = 1 / (D ** 0.5)
          
-        # Autotune will determine the optimal tile sizes for forward pass
+        # Autotune will determine the optimal tile sizes
+        # Note: We use a reasonable default for grid calculation, but autotune will optimize internally
         def grid(meta):
             return (math.ceil(n_queries / meta['Q_TILE_SIZE']), batch_size)
         
@@ -586,10 +573,10 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         
         scale = 1 / (D ** 0.5)
         
-        # Pass 1: Compute dQ with autotuning
+        # Pass 1: Compute dQ
+        # grid_dq = (math.ceil(n_queries / ctx.Q_TILE_SIZE), batch_size)
         def grid_dq(meta):
             return (math.ceil(n_queries / meta['Q_TILE_SIZE']), batch_size)
-            
         flash_bwd_dq_kernel[grid_dq](
             Q_2d, K_2d, V_2d, O_2d, dO_2d, L_2d, DD_2d,
             dQ,
@@ -602,12 +589,13 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
             n_queries, n_keys,
             scale, D,
             ctx.is_causal,
+            # ctx.Q_TILE_SIZE, ctx.K_TILE_SIZE,
         )
         
-        # Pass 2: Compute dK and dV with autotuning
+        # Pass 2: Compute dK and dV
+        # grid_dkv = (math.ceil(n_keys / ctx.K_TILE_SIZE), batch_size)
         def grid_dkv(meta):
-            return (math.ceil(n_keys / meta['K_TILE_SIZE']), batch_size)
-            
+            return (math.ceil(n_queries / meta['K_TILE_SIZE']), batch_size)
         flash_bwd_dkv_kernel[grid_dkv](
             Q_2d, K_2d, V_2d, O_2d, dO_2d, L_2d, DD_2d,
             dK, dV,
@@ -620,6 +608,7 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
             n_queries, n_keys,
             scale, D,
             ctx.is_causal,
+            # ctx.Q_TILE_SIZE, ctx.K_TILE_SIZE,
         )
         
         # Reshape back to original shape
@@ -629,94 +618,87 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         
         return dQ, dK, dV, None
 
+# for benchmarking
+# ...existing code...
 
-# Utility functions for benchmarking and configuration analysis
-def get_autotuned_configs(n_heads, d_head, sequence_length, dtype=torch.bfloat16, device='cuda'):
-    """Trigger autotuning and get the best configurations for forward and backward kernels."""
-    print(f"🔍 Finding best autotuned configs for (n_heads={n_heads}, d_head={d_head}, seq_len={sequence_length})...")
-    
-    # Create test tensors to trigger autotuning
+def get_autotuned_config(n_heads, d_head, sequence_length, dtype=torch.bfloat16, device='cuda'):
+    """Trigger autotuning for backward kernels and return discovered best configs.
+
+    This runs a forward + backward to exercise the backward kernels' autotuning,
+    then reads back `best_config` from each autotuned Triton kernel (if available).
+    """
+    print(f"🔍 Triggering autotune for backward kernels (n_heads={n_heads}, d_head={d_head}, seq_len={sequence_length})...")
+    # Create small tensors to trigger kernel compilation/autotuning
     q, k, v = torch.randn(
         3, n_heads, sequence_length, d_head, device=device, dtype=dtype, requires_grad=True
     )
-    
-    # Trigger autotuning by running forward and backward passes
+
+    # flash = torch.compile(FlashAttentionTritonOptimized.apply)
     flash = FlashAttentionTritonOptimized.apply
-    
-    # Forward pass triggers forward kernel autotuning
+
+    # Run forward to populate ctx.saved_tensors (forward uses existing forward impl)
     o = flash(q, k, v, True)
-    
-    # Backward pass triggers backward kernel autotuning
+
+    # Run backward to trigger backward kernels' autotune
     loss = o.sum()
     loss.backward()
-    
+
     configs = {}
-    
-    # Try to access configs from all kernels
-    try:
-        fwd_config = getattr(flash_fwd_kernel, 'best_config', None)
-        if fwd_config:
-            configs['forward'] = {
-                'Q_TILE_SIZE': fwd_config.kwargs['Q_TILE_SIZE'],
-                'K_TILE_SIZE': fwd_config.kwargs['K_TILE_SIZE'],
-                'num_stages': fwd_config.num_stages,
-                'num_warps': fwd_config.num_warps
-            }
-            print(f"📊 Forward kernel best config:")
-            print(f"   Q_TILE_SIZE: {configs['forward']['Q_TILE_SIZE']}")
-            print(f"   K_TILE_SIZE: {configs['forward']['K_TILE_SIZE']}")
-            print(f"   num_stages: {configs['forward']['num_stages']}")
-            print(f"   num_warps: {configs['forward']['num_warps']}")
-    except Exception as e:
-        print(f"⚠️  Forward autotuning completed, config not accessible: {e}")
-    
-    try:
-        bwd_dq_config = getattr(flash_bwd_dq_kernel, 'best_config', None)
-        if bwd_dq_config:
-            configs['backward_dq'] = {
-                'Q_TILE_SIZE': bwd_dq_config.kwargs['Q_TILE_SIZE'],
-                'K_TILE_SIZE': bwd_dq_config.kwargs['K_TILE_SIZE'],
-                'num_stages': bwd_dq_config.num_stages,
-                'num_warps': bwd_dq_config.num_warps
-            }
-            print(f"📊 Backward dQ kernel best config:")
-            print(f"   Q_TILE_SIZE: {configs['backward_dq']['Q_TILE_SIZE']}")
-            print(f"   K_TILE_SIZE: {configs['backward_dq']['K_TILE_SIZE']}")
-            print(f"   num_stages: {configs['backward_dq']['num_stages']}")
-            print(f"   num_warps: {configs['backward_dq']['num_warps']}")
-    except Exception as e:
-        print(f"⚠️  Backward dQ autotuning completed, config not accessible: {e}")
-    
-    try:
-        bwd_dkv_config = getattr(flash_bwd_dkv_kernel, 'best_config', None)
-        if bwd_dkv_config:
-            configs['backward_dkv'] = {
-                'Q_TILE_SIZE': bwd_dkv_config.kwargs['Q_TILE_SIZE'],
-                'K_TILE_SIZE': bwd_dkv_config.kwargs['K_TILE_SIZE'],
-                'num_stages': bwd_dkv_config.num_stages,
-                'num_warps': bwd_dkv_config.num_warps
-            }
-            print(f"📊 Backward dK/dV kernel best config:")
-            print(f"   Q_TILE_SIZE: {configs['backward_dkv']['Q_TILE_SIZE']}")
-            print(f"   K_TILE_SIZE: {configs['backward_dkv']['K_TILE_SIZE']}")
-            print(f"   num_stages: {configs['backward_dkv']['num_stages']}")
-            print(f"   num_warps: {configs['backward_dkv']['num_warps']}")
-    except Exception as e:
-        print(f"⚠️  Backward dK/dV autotuning completed, config not accessible: {e}")
-    
-    return configs if configs else None
 
+    # Try to read best_config for dQ kernel
+    try:
+        print(flash_fwd_kernel.bset_config)
+        print("here")
+        # cfg = getattr(flash_bwd_dq_kernel, "best_config", None)
+        cfg = getattr(flash_fwd_kernel, "best_config", None)
+        if cfg is not None:
+            configs["bwd_dq"] = {
+                "Q_TILE_SIZE": cfg.kwargs.get("Q_TILE_SIZE"),
+                "K_TILE_SIZE": cfg.kwargs.get("K_TILE_SIZE"),
+                "num_stages": cfg.num_stages,
+                "num_warps": cfg.num_warps,
+            }
+            print("✅ flash_bwd_dq_kernel best config:", configs["bwd_dq"])
+        else:
+            print("⚠️ flash_bwd_dq_kernel completed autotune but no accessible best_config.")
+    except Exception as e:
+        print("⚠️ Error reading flash_bwd_dq_kernel.best_config:", e)
 
+    # Try to read best_config for dK/dV kernel
+    try:
+        cfg = getattr(flash_bwd_dkv_kernel, "best_config", None)
+        if cfg is not None:
+            configs["bwd_dkv"] = {
+                "Q_TILE_SIZE": cfg.kwargs.get("Q_TILE_SIZE"),
+                "K_TILE_SIZE": cfg.kwargs.get("K_TILE_SIZE"),
+                "num_stages": cfg.num_stages,
+                "num_warps": cfg.num_warps,
+            }
+            print("✅ flash_bwd_dkv_kernel best config:", configs["bwd_dkv"])
+        else:
+            print("⚠️ flash_bwd_dkv_kernel completed autotune but no accessible best_config.")
+    except Exception as e:
+        print("⚠️ Error reading flash_bwd_dkv_kernel.best_config:", e)
+
+    if not configs:
+        print("ℹ️ No autotuned configs discovered or accessible.")
+        return None
+    return configs
+
+# for benchmarking
 def test_timing_flash_forward_backward(
     test, n_heads, d_head, sequence_length, dtype=torch.bfloat16, device='cuda', track_memory=False
 ):
-    """Benchmark the fully autotuned FlashAttention implementation."""
     q, k, v = torch.randn(
         3, n_heads, sequence_length, d_head, device=device, dtype=dtype, requires_grad=True
     )
     
-    # Use the fully autotuned implementation with torch.compile for additional optimization
+    # For autotuned version, use the function directly since tile sizes are auto-determined
     flash = torch.compile(FlashAttentionTritonOptimized.apply)
+    # flash = FlashAttentionTritonBackward.apply
+
+    # sanity check; it would fail without compiling if precision in triton is not implemented right
+    # flash = FlashAttentionTritonAutotune.apply
     
     def flash_forward():
         o = flash(q, k, v, True)
@@ -757,43 +739,11 @@ def test_timing_flash_forward_backward(
         print(f"⏱️  Timing results: {results} ms")
         return results
 
-
 if __name__ == "__main__":
-    print("🚀 FlashAttention with Full Triton Autotuning (Forward + Backward)")
-    print("=" * 70)
-    
-    print("\n1️⃣  Small sequence configuration (1024):")
-    configs_small = get_autotuned_configs(16, 128, 1024, dtype=torch.bfloat16)
-    
-    print("\n--- Benchmarking Small Sequence Forward Pass ---")
-    test_timing_flash_forward_backward(
-        "forward", 16, 128, 1024, 
-        dtype=torch.bfloat16, track_memory=True
-    )
-    
-    print("\n--- Benchmarking Small Sequence Forward + Backward Pass ---")
-    test_timing_flash_forward_backward(
-        "forward_backward", 16, 128, 1024, 
-        dtype=torch.bfloat16, track_memory=True
-    )
-    
-    print("\n2️⃣  Large sequence configuration (4096):")  
-    configs_large = get_autotuned_configs(16, 128, 4096, dtype=torch.bfloat16)
-    
-    print("\n--- Benchmarking Large Sequence Forward Pass ---")
-    test_timing_flash_forward_backward(
-        "forward", 16, 128, 4096, 
-        dtype=torch.bfloat16, track_memory=True
-    )
-    
-    print("\n--- Benchmarking Large Sequence Forward + Backward Pass ---")
+    # Test forward + backward to see memory impact
+    print("\n--- Forward + Backward Pass (4096) ---")
+    get_autotuned_config(16, 128, 4096, dtype=torch.float16)
     test_timing_flash_forward_backward(
         "forward_backward", 16, 128, 4096, 
         dtype=torch.bfloat16, track_memory=True
     )
-    
-    print("\n🎯 Summary:")
-    print("- Forward pass: Fully autotuned with optimal tile sizes")
-    print("- Backward pass: Separate autotuning for dQ and dK/dV kernels")
-    print("- Memory efficient: Only stores necessary intermediate values")
-    print("- Performance optimized: torch.compile compatible")
