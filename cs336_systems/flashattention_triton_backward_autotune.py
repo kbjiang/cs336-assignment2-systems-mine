@@ -346,10 +346,14 @@ class FlashAttentionTritonBackward(torch.autograd.Function):
     """FlashAttention with Triton backward pass (2-pass algorithm)"""
     
     @staticmethod
-    def forward(ctx, Q, K, V, is_causal=False, B_q=16, B_k=16):
+    def forward(ctx, Q, K, V, is_causal=False):
         # Use the existing forward kernel from your implementation
-        from cs336_systems.flashattention import FlashAttentionTriton
-        return FlashAttentionTriton.forward(ctx, Q, K, V, is_causal, B_q, B_k)
+        from cs336_systems.flashattention_triton_autotune import FlashAttentionTritonAutotune
+        return FlashAttentionTritonAutotune.forward(ctx, Q, K, V, is_causal)
+    # def forward(ctx, Q, K, V, is_causal=False, B_q=16, B_k=16):
+    #     # Use the existing forward kernel from your implementation
+    #     from cs336_systems.flashattention import FlashAttentionTriton
+    #     return FlashAttentionTriton.forward(ctx, Q, K, V, is_causal, B_q, B_k)
     
     @staticmethod
     def backward(ctx, dO):
