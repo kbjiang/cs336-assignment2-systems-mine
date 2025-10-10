@@ -440,24 +440,68 @@ class FlashAttentionTritonBackward(torch.autograd.Function):
         return dQ, dK, dV, None, None, None
 
 # for benchmarking
+# ...existing code...
+
 def get_autotuned_config(n_heads, d_head, sequence_length, dtype=torch.bfloat16, device='cuda'):
-    # To get the best configurate
-    
-    # Access the best config from the autotuned kernel
+    """Trigger autotuning for backward kernels and return discovered best configs.
+
+    This runs a forward + backward to exercise the backward kernels' autotuning,
+    then reads back `best_config` from each autotuned Triton kernel (if available).
+    """
+    print(f"🔍 Triggering autotune for backward kernels (n_heads={n_heads}, d_head={d_head}, seq_len={sequence_length})...")
+    # Create small tensors to trigger kernel compilation/autotuning
+    q, k, v = torch.randn(
+        3, n_heads, sequence_length, d_head, device=device, dtype=dtype, requires_grad=True
+    )
+
+    flash = torch.compile(FlashAttentionTritonBackward.apply)
+    # flash = FlashAttentionTritonBackward.apply
+
+    # Run forward to populate ctx.saved_tensors (forward uses existing forward impl)
+    o = flash(q, k, v, True)
+
+    # Run backward to trigger backward kernels' autotune
+    loss = o.sum()
+    loss.backward()
+
+    configs = {}
+
+    # Try to read best_config for dQ kernel
     try:
-        best_config = getattr(flash_bwd_dq_kernel, 'best_config', None)
-        # ...
+        cfg = getattr(flash_bwd_dq_kernel, "best_config", None)
+        if cfg is not None:
+            configs["bwd_dq"] = {
+                "Q_TILE_SIZE": cfg.kwargs.get("Q_TILE_SIZE"),
+                "K_TILE_SIZE": cfg.kwargs.get("K_TILE_SIZE"),
+                "num_stages": cfg.num_stages,
+                "num_warps": cfg.num_warps,
+            }
+            print("✅ flash_bwd_dq_kernel best config:", configs["bwd_dq"])
+        else:
+            print("⚠️ flash_bwd_dq_kernel completed autotune but no accessible best_config.")
     except Exception as e:
-        print(f"⚠️  Autotuning completed successfully")
-        print(f"   Config details not accessible: {e}")
-        return None
+        print("⚠️ Error reading flash_bwd_dq_kernel.best_config:", e)
+
+    # Try to read best_config for dK/dV kernel
     try:
-        best_config = getattr(flash_bwd_dkv_kernel, 'best_config', None)
-        # ...
+        cfg = getattr(flash_bwd_dkv_kernel, "best_config", None)
+        if cfg is not None:
+            configs["bwd_dkv"] = {
+                "Q_TILE_SIZE": cfg.kwargs.get("Q_TILE_SIZE"),
+                "K_TILE_SIZE": cfg.kwargs.get("K_TILE_SIZE"),
+                "num_stages": cfg.num_stages,
+                "num_warps": cfg.num_warps,
+            }
+            print("✅ flash_bwd_dkv_kernel best config:", configs["bwd_dkv"])
+        else:
+            print("⚠️ flash_bwd_dkv_kernel completed autotune but no accessible best_config.")
     except Exception as e:
-        print(f"⚠️  Autotuning completed successfully")
-        print(f"   Config details not accessible: {e}")
+        print("⚠️ Error reading flash_bwd_dkv_kernel.best_config:", e)
+
+    if not configs:
+        print("ℹ️ No autotuned configs discovered or accessible.")
         return None
+    return configs
 
 # for benchmarking
 def test_timing_flash_forward_backward(
@@ -469,6 +513,8 @@ def test_timing_flash_forward_backward(
     
     # For autotuned version, use the function directly since tile sizes are auto-determined
     flash = torch.compile(FlashAttentionTritonBackward.apply)
+    # flash = FlashAttentionTritonBackward.apply
+
     # sanity check; it would fail without compiling if precision in triton is not implemented right
     # flash = FlashAttentionTritonAutotune.apply
     
@@ -514,6 +560,7 @@ def test_timing_flash_forward_backward(
 if __name__ == "__main__":
     # Test forward + backward to see memory impact
     print("\n--- Forward + Backward Pass (4096) ---")
+    get_autotuned_config(16, 128, 4096, dtype=torch.float16)
     test_timing_flash_forward_backward(
         "forward_backward", 16, 128, 4096, 
         dtype=torch.bfloat16, track_memory=True
