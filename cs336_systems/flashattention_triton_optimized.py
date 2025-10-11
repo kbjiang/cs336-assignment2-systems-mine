@@ -595,7 +595,7 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         # Pass 2: Compute dK and dV
         # grid_dkv = (math.ceil(n_keys / ctx.K_TILE_SIZE), batch_size)
         def grid_dkv(meta):
-            return (math.ceil(n_queries / meta['K_TILE_SIZE']), batch_size)
+            return (math.ceil(n_keys / meta['K_TILE_SIZE']), batch_size)
         flash_bwd_dkv_kernel[grid_dkv](
             Q_2d, K_2d, V_2d, O_2d, dO_2d, L_2d, DD_2d,
             dK, dV,
@@ -633,8 +633,8 @@ def get_autotuned_config(n_heads, d_head, sequence_length, dtype=torch.bfloat16,
         3, n_heads, sequence_length, d_head, device=device, dtype=dtype, requires_grad=True
     )
 
-    # flash = torch.compile(FlashAttentionTritonOptimized.apply)
-    flash = FlashAttentionTritonOptimized.apply
+    flash = torch.compile(FlashAttentionTritonOptimized.apply)
+    # flash = FlashAttentionTritonOptimized.apply
 
     # Run forward to populate ctx.saved_tensors (forward uses existing forward impl)
     o = flash(q, k, v, True)
@@ -646,44 +646,18 @@ def get_autotuned_config(n_heads, d_head, sequence_length, dtype=torch.bfloat16,
     configs = {}
 
     # Try to read best_config for dQ kernel
-    try:
-        print(flash_fwd_kernel.bset_config)
-        print("here")
-        # cfg = getattr(flash_bwd_dq_kernel, "best_config", None)
-        cfg = getattr(flash_fwd_kernel, "best_config", None)
-        if cfg is not None:
-            configs["bwd_dq"] = {
-                "Q_TILE_SIZE": cfg.kwargs.get("Q_TILE_SIZE"),
-                "K_TILE_SIZE": cfg.kwargs.get("K_TILE_SIZE"),
-                "num_stages": cfg.num_stages,
-                "num_warps": cfg.num_warps,
-            }
-            print("✅ flash_bwd_dq_kernel best config:", configs["bwd_dq"])
-        else:
-            print("⚠️ flash_bwd_dq_kernel completed autotune but no accessible best_config.")
-    except Exception as e:
-        print("⚠️ Error reading flash_bwd_dq_kernel.best_config:", e)
-
-    # Try to read best_config for dK/dV kernel
-    try:
-        cfg = getattr(flash_bwd_dkv_kernel, "best_config", None)
-        if cfg is not None:
-            configs["bwd_dkv"] = {
-                "Q_TILE_SIZE": cfg.kwargs.get("Q_TILE_SIZE"),
-                "K_TILE_SIZE": cfg.kwargs.get("K_TILE_SIZE"),
-                "num_stages": cfg.num_stages,
-                "num_warps": cfg.num_warps,
-            }
-            print("✅ flash_bwd_dkv_kernel best config:", configs["bwd_dkv"])
-        else:
-            print("⚠️ flash_bwd_dkv_kernel completed autotune but no accessible best_config.")
-    except Exception as e:
-        print("⚠️ Error reading flash_bwd_dkv_kernel.best_config:", e)
-
-    if not configs:
-        print("ℹ️ No autotuned configs discovered or accessible.")
-        return None
-    return configs
+    # cfg = getattr(flash_bwd_dq_kernel, "best_config", None)
+    cfg = getattr(flash_fwd_kernel, "best_config", None)
+    if cfg is not None:
+        configs["bwd_dq"] = {
+            "Q_TILE_SIZE": cfg.kwargs.get("Q_TILE_SIZE"),
+            "K_TILE_SIZE": cfg.kwargs.get("K_TILE_SIZE"),
+            "num_stages": cfg.num_stages,
+            "num_warps": cfg.num_warps,
+        }
+        print("✅ flash_bwd_dq_kernel best config:", configs["bwd_dq"])
+    else:
+        print(f"⚠️  Autotuning config not accessible. Check if flash is wrapped in `torch.compile`.")
 
 # for benchmarking
 def test_timing_flash_forward_backward(
@@ -695,7 +669,7 @@ def test_timing_flash_forward_backward(
     
     # For autotuned version, use the function directly since tile sizes are auto-determined
     flash = torch.compile(FlashAttentionTritonOptimized.apply)
-    # flash = FlashAttentionTritonBackward.apply
+    # flash = FlashAttentionTritonOptimized.apply
 
     # sanity check; it would fail without compiling if precision in triton is not implemented right
     # flash = FlashAttentionTritonAutotune.apply
@@ -717,9 +691,9 @@ def test_timing_flash_forward_backward(
         initial_memory = torch.cuda.memory_allocated(device)
         
     if test == "forward":
-        results = triton.testing.do_bench(flash_forward, rep=1000, warmup=1000)
+        results = triton.testing.do_bench(flash_forward, rep=10000, warmup=1000)
     elif test == "forward_backward":
-        results = triton.testing.do_bench(flash_forward_backward, rep=1000, warmup=1000)
+        results = triton.testing.do_bench(flash_forward_backward, rep=10000, warmup=1000)
     else:
         raise ValueError("Wrong selection.")
         
@@ -742,8 +716,8 @@ def test_timing_flash_forward_backward(
 if __name__ == "__main__":
     # Test forward + backward to see memory impact
     print("\n--- Forward + Backward Pass (4096) ---")
-    get_autotuned_config(16, 128, 4096, dtype=torch.float16)
+    # get_autotuned_config(16, 128, 4096, dtype=torch.float16)
     test_timing_flash_forward_backward(
-        "forward_backward", 16, 128, 4096, 
+        "forward_backward", 1, 16, 65536, 
         dtype=torch.bfloat16, track_memory=True
     )

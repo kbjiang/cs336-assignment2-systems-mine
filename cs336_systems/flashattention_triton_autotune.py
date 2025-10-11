@@ -231,26 +231,19 @@ def get_autotuned_config(n_heads, d_head, sequence_length, dtype=torch.bfloat16,
     
     # Trigger autotuning by running the kernel once
     flash = FlashAttentionTritonAutotune.apply
+    # flash = torch.compile(FlashAttentionTritonAutotune.apply)
     _ = flash(q, k, v, True)
     
     # Access the best config from the autotuned kernel
-    try:
-        best_config = getattr(flash_fwd_kernel, 'best_config', None)
-        if best_config:
-            print(f"📊 Best autotuned config found:")
-            print(f"   Q_TILE_SIZE: {best_config.kwargs['Q_TILE_SIZE']}")
-            print(f"   K_TILE_SIZE: {best_config.kwargs['K_TILE_SIZE']}")
-            print(f"   num_stages: {best_config.num_stages}")
-            print(f"   num_warps: {best_config.num_warps}")
-            return best_config
-        else:
-            print(f"⚠️  Autotuning completed but config not accessible")
-            print("   (This can happen with some Triton versions)")
-            return None
-    except Exception as e:
-        print(f"⚠️  Autotuning completed successfully")
-        print(f"   Config details not accessible: {e}")
-        return None
+    best_config = getattr(flash_fwd_kernel, 'best_config', None)
+    if best_config:
+        print(f"📊 Best autotuned config found:")
+        print(f"   Q_TILE_SIZE: {best_config.kwargs['Q_TILE_SIZE']}")
+        print(f"   K_TILE_SIZE: {best_config.kwargs['K_TILE_SIZE']}")
+        print(f"   num_stages: {best_config.num_stages}")
+        print(f"   num_warps: {best_config.num_warps}")
+    else:
+        print(f"⚠️  Autotuning config not accessible. Check if flash is wrapped in `torch.compile`.")
 
 def test_timing_flash_forward_backward(
     test, n_heads, d_head, sequence_length, dtype=torch.bfloat16, device='cuda', track_memory=False

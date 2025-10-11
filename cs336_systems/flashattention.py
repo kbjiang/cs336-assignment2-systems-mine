@@ -247,17 +247,12 @@ class FlashAttentionTriton(torch.autograd.Function):
         K = rearrange(K, "... d -> (...) d")
         V = rearrange(V, "... d -> (...) d")
 
-        ctx.save_for_backward(Q, K, V)
-        ctx.is_causal = is_causal
-
         for t in [Q, K, V]:
             assert t.is_cuda, "Expected CUDA tensors"
             assert t.is_contiguous(), "Our pointer arithmetic will assume contiguous inputs"
 
         ctx.Q_TILE_SIZE = B_q
         ctx.K_TILE_SIZE = B_k
-        ctx.Q_input_shape = Q_input_shape
-        ctx.K_input_shape = K_input_shape
 
         # Host-side tensor uses input dtype
         O = torch.empty(Q.shape, device=Q.device, dtype=Q.dtype)
@@ -302,6 +297,8 @@ class FlashAttentionTriton(torch.autograd.Function):
         V = V.view(K_input_shape).contiguous()
         L = L.view(batch_size, n_queries).contiguous()
         ctx.save_for_backward(Q, K, V, L, O)
+        ctx.is_causal = is_causal
+
         return O
     
     @staticmethod

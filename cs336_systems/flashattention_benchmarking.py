@@ -2,14 +2,16 @@ import json
 import torch
 import triton
 from cs336_systems.flashattention import AttentionPytorch as NoFlashTorch
-# from cs336_systems.flashattention_triton_autotune import FlashAttentionTritonAutotune as FlashTritonAuto
-from cs336_systems.flashattention_triton_optimized import FlashAttentionTritonOptimized as FlashTriton
+from cs336_systems.flashattention_triton_autotune import FlashAttentionTritonAutotune as FlashTriton
+# from cs336_systems.flashattention_triton_optimized import FlashAttentionTritonOptimized as FlashTriton
+# from cs336_systems.flashattention_triton_backward_autotune import FlashAttentionTritonBackward as FlashTriton
+# from cs336_systems.flashattention_triton_backward import FlashAttentionTritonBackward as FlashTriton
 import itertools
 from tqdm.auto import tqdm
 
 IMPL_DICT = {
     "NoFlashTorch": NoFlashTorch, 
-    "Triton": FlashTriton,
+    "FlashTriton_": FlashTriton,
 }
 
 def benchmark_flash(
@@ -23,7 +25,7 @@ def benchmark_flash(
     impl = IMPL_DICT[impl_name]
     flash = torch.compile(impl.apply)
     # sanity check; it would fail without compiling if precision in triton is not implemented right
-    # flash = FlashAttentionTritonAutotune.apply
+    flash = impl.apply
     
     def flash_forward():
         o = flash(q, k, v, True)
@@ -74,13 +76,17 @@ if __name__ == "__main__":
     tests = ["forward", "forward_backward"]
     dtypes = [torch.bfloat16, torch.float32]
     n_heads = 1
-    d_heads = [2**n for n in range(4, 8)]
-    seq_lens = [2**n for n in range(7, 17)]
+    d_heads = [2**n for n in range(6, 8)]
+    seq_lens = [2**n for n in range(12, 17)]
     
     # Convert to list so tqdm can automatically detect the total
-    all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, tests, IMPL_DICT.keys()))
+    # all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, tests, IMPL_DICT.keys()))
+    all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, ["forward_backward"], ["FlashTriton_"]))
     print(f"Total configurations to test: {len(all_combinations)}")
     
+    # Clean up before starting the benchmark suite
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
     with open(output_file, "w") as f:
         for d_head, seq_len, dtype, test, impl_name in tqdm(all_combinations):
             # print(f"Testing {impl_name} - {test}: d_head={d_head}, seq_len={seq_len}, dtype={dtype}")
@@ -95,4 +101,8 @@ if __name__ == "__main__":
             json.dump(result, f)
             f.write('\n')
             f.flush()  # Ensure immediate write to disk
+
+            # Clean up between iteration
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 

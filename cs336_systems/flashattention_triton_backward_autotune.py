@@ -420,7 +420,7 @@ class FlashAttentionTritonBackward(torch.autograd.Function):
         # Pass 2: Compute dK and dV
         # grid_dkv = (math.ceil(n_keys / ctx.K_TILE_SIZE), batch_size)
         def grid_dkv(meta):
-            return (math.ceil(n_queries / meta['K_TILE_SIZE']), batch_size)
+            return (math.ceil(n_keys / meta['K_TILE_SIZE']), batch_size)
         flash_bwd_dkv_kernel[grid_dkv](
             Q_2d, K_2d, V_2d, O_2d, dO_2d, L_2d, DD_2d,
             dK, dV,
