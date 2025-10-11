@@ -2,10 +2,11 @@ import json
 import torch
 import triton
 from cs336_systems.flashattention import AttentionPytorch as NoFlashTorch
-from cs336_systems.flashattention_triton_autotune import FlashAttentionTritonAutotune as FlashTriton
+# from cs336_systems.flashattention_triton_autotune import FlashAttentionTritonAutotune as FlashTriton
 # from cs336_systems.flashattention_triton_optimized import FlashAttentionTritonOptimized as FlashTriton
 # from cs336_systems.flashattention_triton_backward_autotune import FlashAttentionTritonBackward as FlashTriton
 # from cs336_systems.flashattention_triton_backward import FlashAttentionTritonBackward as FlashTriton
+from cs336_systems.tmp import FlashAttentionTritonBackward as FlashTriton
 import itertools
 from tqdm.auto import tqdm
 
@@ -25,7 +26,7 @@ def benchmark_flash(
     impl = IMPL_DICT[impl_name]
     flash = torch.compile(impl.apply)
     # sanity check; it would fail without compiling if precision in triton is not implemented right
-    flash = impl.apply
+    # flash = impl.apply
     
     def flash_forward():
         o = flash(q, k, v, True)
@@ -81,7 +82,7 @@ if __name__ == "__main__":
     
     # Convert to list so tqdm can automatically detect the total
     # all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, tests, IMPL_DICT.keys()))
-    all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, ["forward_backward"], ["FlashTriton_"]))
+    all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, ["forward_backward"], ["NoFlashTorch", "FlashTriton_"]))
     print(f"Total configurations to test: {len(all_combinations)}")
     
     # Clean up before starting the benchmark suite

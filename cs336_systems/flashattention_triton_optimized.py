@@ -1,5 +1,4 @@
 import torch
-import math
 import triton
 import triton.language as tl
 from einops import rearrange
@@ -291,7 +290,6 @@ def flash_bwd_dq_kernel(
     # Store dQ result
     tl.store(dQ_block_ptr, dQ_block.to(Q_block.dtype), boundary_check=(0,))
 
-
 @triton.autotune(
     configs=AUTOTUNE_CONFIG,
     key=['N_QUERIES', 'N_KEYS', 'D'],
@@ -478,10 +476,6 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         K_2d = rearrange(K, "... d -> (...) d")
         V_2d = rearrange(V, "... d -> (...) d")
 
-        for t in [Q_2d, K_2d, V_2d]:
-            assert t.is_cuda, "Expected CUDA tensors"
-            assert t.is_contiguous(), "Our pointer arithmetic will assume contiguous inputs"
-
         # Host-side tensor uses input dtype
         O = torch.empty(Q_2d.shape, device=Q.device, dtype=Q.dtype)
         L = torch.zeros(batch_size * n_queries, device=Q.device, dtype=Q.dtype)
@@ -505,7 +499,7 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         # Autotune will determine the optimal tile sizes
         # Note: We use a reasonable default for grid calculation, but autotune will optimize internally
         def grid(meta):
-            return (math.ceil(n_queries / meta['Q_TILE_SIZE']), batch_size)
+            return (triton.cdiv(n_queries, meta['Q_TILE_SIZE']), batch_size)
         
         flash_fwd_kernel[grid](
             Q_2d, K_2d, V_2d, O, L,
@@ -540,13 +534,16 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         DD = torch.sum(O * dO, dim=-1)
         
         # Reshape for 2D processing
+        # `.contiguous` is crucial!
         Q_2d = rearrange(Q, "b q d -> (b q) d")
         K_2d = rearrange(K, "b k d -> (b k) d")
         V_2d = rearrange(V, "b k d -> (b k) d")
         O_2d = rearrange(O, "b q d -> (b q) d")
-        dO_2d = rearrange(dO, "b q d -> (b q) d")
         L_2d = rearrange(L, "b q -> (b q)")
         DD_2d = rearrange(DD, "b q -> (b q)")
+        # dO from backprop might not be contiguous!
+        # without `.contigous` will run into 'illegal memory access'
+        dO_2d = rearrange(dO, "b q d -> (b q) d").contiguous()
         
         # Initialize gradients
         dQ = torch.zeros_like(Q_2d)
@@ -574,9 +571,8 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         scale = 1 / (D ** 0.5)
         
         # Pass 1: Compute dQ
-        # grid_dq = (math.ceil(n_queries / ctx.Q_TILE_SIZE), batch_size)
         def grid_dq(meta):
-            return (math.ceil(n_queries / meta['Q_TILE_SIZE']), batch_size)
+            return (triton.cdiv(n_queries, meta['Q_TILE_SIZE']), batch_size)
         flash_bwd_dq_kernel[grid_dq](
             Q_2d, K_2d, V_2d, O_2d, dO_2d, L_2d, DD_2d,
             dQ,
@@ -593,9 +589,8 @@ class FlashAttentionTritonOptimized(torch.autograd.Function):
         )
         
         # Pass 2: Compute dK and dV
-        # grid_dkv = (math.ceil(n_keys / ctx.K_TILE_SIZE), batch_size)
         def grid_dkv(meta):
-            return (math.ceil(n_keys / meta['K_TILE_SIZE']), batch_size)
+            return (triton.cdiv(n_keys, meta['K_TILE_SIZE']), batch_size)
         flash_bwd_dkv_kernel[grid_dkv](
             Q_2d, K_2d, V_2d, O_2d, dO_2d, L_2d, DD_2d,
             dK, dV,
@@ -633,8 +628,8 @@ def get_autotuned_config(n_heads, d_head, sequence_length, dtype=torch.bfloat16,
         3, n_heads, sequence_length, d_head, device=device, dtype=dtype, requires_grad=True
     )
 
-    flash = torch.compile(FlashAttentionTritonOptimized.apply)
-    # flash = FlashAttentionTritonOptimized.apply
+    # flash = torch.compile(FlashAttentionTritonOptimized.apply)
+    flash = FlashAttentionTritonOptimized.apply
 
     # Run forward to populate ctx.saved_tensors (forward uses existing forward impl)
     o = flash(q, k, v, True)
@@ -668,12 +663,9 @@ def test_timing_flash_forward_backward(
     )
     
     # For autotuned version, use the function directly since tile sizes are auto-determined
-    flash = torch.compile(FlashAttentionTritonOptimized.apply)
-    # flash = FlashAttentionTritonOptimized.apply
+    # flash = torch.compile(FlashAttentionTritonOptimized.apply)
+    flash = FlashAttentionTritonOptimized.apply
 
-    # sanity check; it would fail without compiling if precision in triton is not implemented right
-    # flash = FlashAttentionTritonAutotune.apply
-    
     def flash_forward():
         o = flash(q, k, v, True)
 
@@ -716,7 +708,7 @@ def test_timing_flash_forward_backward(
 if __name__ == "__main__":
     # Test forward + backward to see memory impact
     print("\n--- Forward + Backward Pass (4096) ---")
-    # get_autotuned_config(16, 128, 4096, dtype=torch.float16)
+    get_autotuned_config(1, 16, 65536, dtype=torch.float16)
     test_timing_flash_forward_backward(
         "forward_backward", 1, 16, 65536, 
         dtype=torch.bfloat16, track_memory=True

@@ -345,9 +345,11 @@ class FlashAttentionTritonBackward(torch.autograd.Function):
         K_2d = rearrange(K, "b k d -> (b k) d")
         V_2d = rearrange(V, "b k d -> (b k) d")
         O_2d = rearrange(O, "b q d -> (b q) d")
-        dO_2d = rearrange(dO, "b q d -> (b q) d")
         L_2d = rearrange(L, "b q -> (b q)")
         DD_2d = rearrange(DD, "b q -> (b q)")
+        # dO from backprop might not be contiguous!
+        # without `.contigous` will run into 'illegal memory access'
+        dO_2d = rearrange(dO, "b q d -> (b q) d").contiguous()
         
         # Initialize gradients
         dQ = torch.zeros_like(Q_2d)
@@ -424,9 +426,8 @@ def test_timing_flash_forward_backward(
     )
     
     # For autotuned version, use the function directly since tile sizes are auto-determined
-    flash = torch.compile(FlashAttentionTritonBackward.apply)
-    # sanity check; it would fail without compiling if precision in triton is not implemented right
-    # flash = FlashAttentionTritonAutotune.apply
+    # flash = torch.compile(FlashAttentionTritonBackward.apply)
+    flash = FlashAttentionTritonBackward.apply
     
     def flash_forward():
         o = flash(q, k, v, True)
@@ -471,6 +472,6 @@ if __name__ == "__main__":
     # Test forward + backward to see memory impact
     print("\n--- Forward + Backward Pass (4096) ---")
     test_timing_flash_forward_backward(
-        "forward_backward", 16, 128, 4096, 
+        "forward_backward", 1, 128, 2**16, 
         dtype=torch.bfloat16, track_memory=True
     )

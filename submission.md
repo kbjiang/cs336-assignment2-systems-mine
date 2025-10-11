@@ -242,6 +242,9 @@
 1. `triton.autotune`
 1. peak memory? why not much memory difference?
 1. From a performance perspective, compiling the backward recomputation either (A) inside the module (compile the recompute function and call it from the autograd backward) or (B) by compiling the wrapper that calls your autograd Function (e.g. `torch.compile(FlashAttention2(...))`) will yield very similar runtime performance after the first call.
+1. `tensor.contiguous()` is crucial! Without it I keep running into "illegal memory access" when doing `backward` with Triton.
+    1. E.g., `dO_2d = rearrange(dO, "b q d -> (b q) d").contiguous()` coz `dO` might not be contiguous coming from backprop.
+    1. Always test WITHOUT `torch.compile` on `impl.apply`-- sometimes non-contiguous problem got covered up.
 
 
 1. Issues with Algorithm 2:
