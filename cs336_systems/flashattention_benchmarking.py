@@ -83,9 +83,6 @@ if __name__ == "__main__":
     # all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, ["forward_backward"], ["NoFlashTorch", "FlashTriton_"]))
     print(f"Total configurations to test: {len(all_combinations)}")
     
-    # Clean up before starting the benchmark suite
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
     with open(output_file, "w") as f:
         for d_head, seq_len, dtype, test, impl_name in tqdm(all_combinations):
             # print(f"Testing {impl_name} - {test}: d_head={d_head}, seq_len={seq_len}, dtype={dtype}")
@@ -100,8 +97,3 @@ if __name__ == "__main__":
             json.dump(result, f)
             f.write('\n')
             f.flush()  # Ensure immediate write to disk
-
-            # Clean up between iteration
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
