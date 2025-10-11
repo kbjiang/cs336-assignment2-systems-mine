@@ -391,3 +391,41 @@ This recomputation is worth it because:
 1. Avoids storing large P matrix (would require O(N²) memory)
 2. Eliminates atomic operations (massive performance win)
 3. P computation is fast compared to atomic serialization overhead
+
+----
+
+# Triton Autotune Parameters: num_stages and num_warps
+
+## Overview
+`num_stages` and `num_warps` are important performance tuning parameters in Triton that control how the GPU executes your kernel.
+
+## num_warps
+**What it is**: The number of warps (groups of 32 threads) per thread block
+
+**Range**: Typically 1, 2, 4, or 8 warps (32, 64, 128, or 256 threads per block)
+
+**Trade-offs**:
+- **More warps**: Better latency hiding, more parallelism within a block
+- **Fewer warps**: More registers/shared memory per thread, potentially better for compute-heavy kernels
+
+**Example**: `num_warps=4` means 128 threads per block
+
+## num_stages
+**What it is**: The number of pipeline stages for software pipelining
+
+**Purpose**: Overlaps memory loads with computation to hide memory latency
+
+**How it works**:
+- Stage 1: Load data from global memory
+- Stage 2: Compute on previously loaded data while loading next data
+- Stage 3+: Continue overlapping loads and computes
+
+**Trade-offs**:
+- **More stages**: Better memory latency hiding, higher throughput
+- **Fewer stages**: Less shared memory usage, simpler scheduling
+
+**Typical values**: 1-5 stages
+
+## Example Configuration
+```python
+triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8)

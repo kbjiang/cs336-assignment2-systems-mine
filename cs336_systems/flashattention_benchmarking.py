@@ -3,10 +3,8 @@ import torch
 import triton
 from cs336_systems.flashattention import AttentionPytorch as NoFlashTorch
 # from cs336_systems.flashattention_triton_autotune import FlashAttentionTritonAutotune as FlashTriton
-# from cs336_systems.flashattention_triton_optimized import FlashAttentionTritonOptimized as FlashTriton
-# from cs336_systems.flashattention_triton_backward_autotune import FlashAttentionTritonBackward as FlashTriton
 # from cs336_systems.flashattention_triton_backward import FlashAttentionTritonBackward as FlashTriton
-from cs336_systems.tmp import FlashAttentionTritonBackward as FlashTriton
+from cs336_systems.flashattention_triton_optimized import FlashAttentionTritonOptimized as FlashTriton
 import itertools
 from tqdm.auto import tqdm
 
