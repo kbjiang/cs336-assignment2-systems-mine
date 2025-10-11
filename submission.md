@@ -245,6 +245,10 @@
 1. `tensor.contiguous()` is crucial! Without it I keep running into "illegal memory access" when doing `backward` with Triton.
     1. E.g., `dO_2d = rearrange(dO, "b q d -> (b q) d").contiguous()` coz `dO` might not be contiguous coming from backprop.
     1. Always test WITHOUT `torch.compile` on `impl.apply`-- sometimes non-contiguous problem got covered up.
+1. Things I did to get `FlashAttentionTritonOptimized`
+    1. skipping zero masks helped a lot; when `is_causal=False` the test is much slower
+    1. `triton` for both forward/backward passes
+    1. `triton.autotune` helps
 
 
 1. Issues with Algorithm 2:
