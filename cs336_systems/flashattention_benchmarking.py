@@ -75,12 +75,12 @@ if __name__ == "__main__":
     tests = ["forward", "forward_backward"]
     dtypes = [torch.bfloat16, torch.float32]
     n_heads = 1
-    d_heads = [2**n for n in range(6, 8)]
-    seq_lens = [2**n for n in range(12, 17)]
+    d_heads = [2**n for n in range(4, 8)]
+    seq_lens = [2**n for n in range(7, 17)]
     
     # Convert to list so tqdm can automatically detect the total
-    # all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, tests, IMPL_DICT.keys()))
-    all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, ["forward_backward"], ["NoFlashTorch", "FlashTriton_"]))
+    all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, tests, IMPL_DICT.keys()))
+    # all_combinations = list(itertools.product(d_heads, seq_lens, dtypes, ["forward_backward"], ["NoFlashTorch", "FlashTriton_"]))
     print(f"Total configurations to test: {len(all_combinations)}")
     
     # Clean up before starting the benchmark suite
