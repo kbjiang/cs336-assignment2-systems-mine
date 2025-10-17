@@ -23,7 +23,7 @@ def get_data(rank, world_size, size_in_mb, backend, batch_size=64):
     num_elem = size_in_mb * 1024 // 4 // world_size // batch_size
     return torch.randn(batch_size, num_elem, device=get_device(rank, backend))
 
-def all_reduce(rank, backend, world_size, data_size):
+def all_reduce_benchmarking(rank, backend, world_size, data_size):
     setup(rank, world_size, backend)
     # Move data to the appropriate device
     data = get_data(rank, world_size, data_size, backend)
@@ -72,4 +72,4 @@ if __name__ == "__main__":
     for backend, world_size, data_size in itertools.product(
         backends, world_sizes, data_sizes
     ):
-        mp.spawn(fn=all_reduce, args=(backend, world_size, data_size), nprocs=world_size, join=True)
+        mp.spawn(fn=all_reduce_benchmarking, args=(backend, world_size, data_size), nprocs=world_size, join=True)
