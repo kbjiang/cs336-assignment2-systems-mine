@@ -433,3 +433,14 @@ This recomputation is worth it because:
 ## Example Configuration
 ```python
 triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=8)
+```
+
+## 2.1.1 Best Practices for Benchmarking Distributed Applications
+### Learnings
+1. use `dist.all_gather` to gather the result from each rank
+1. Should use same data for warmup. Why?
+    1. Different tensor sizes trigger different code paths: GPU kernels, memory allocation patterns, and NCCL's internal algorithms can vary significantly based on tensor size. Warming up with a 1MB tensor won't properly warm up the cache, memory allocators, or kernel configurations for a 100MB tensor.
+    2. Memory allocation effects: The first time you allocate and use a large tensor, PyTorch/CUDA might need to allocate memory pools, which adds overhead. If you warmup with small tensors, this overhead will still hit your benchmark.
+    3. NCCL algorithm selection: NCCL often selects different communication algorithms based on message size (ring, tree, etc.). Warming up with the wrong size won't prepare the right algorithm.
+1. Call `torch.cuda.synchronize()` to wait for CUDA operations to complete when benchmarking on GPUs. Note that this is necessary even when calling communication operations with `async_op=False`, which returns when the operation is queued on the GPU (as opposed to when the communication actually finishes). For more [detail](https://github.com/pytorch/pytorch/issues/68112#issuecomment-965932386).
+### Ansers
