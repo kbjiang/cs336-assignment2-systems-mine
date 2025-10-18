@@ -34,14 +34,14 @@ def all_reduce_benchmarking(rank, backend, world_size, data_size):
         dist.all_reduce(data, async_op=False)
         if backend == "nccl":
             torch.cuda.synchronize()
-        dist.barrier()
+        # dist.barrier()
     
     # benchmarking
     start_time = time.time()
     dist.all_reduce(data, async_op=False)
     if backend == "nccl":
         torch.cuda.synchronize()
-    dist.barrier()
+    # dist.barrier()
     # print(data)
     duration = time.time() - start_time
 

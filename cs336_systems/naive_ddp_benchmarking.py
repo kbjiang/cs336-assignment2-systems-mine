@@ -1,5 +1,5 @@
 import os
-import timeit
+import time
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -41,24 +41,38 @@ def run_test(
 
     model.to(get_device(rank, "nccl"))
     def train_step():
+        total_start = time.time()
         y_hat = model(x)
         loss = cross_entropy(y_hat, y)
         optimizer.zero_grad()
         loss.backward()
+        torch.cuda.synchronize()
+        # dist.barrier()
 
         # 2.1 all-reduce to average the gradients and copy to each rank
         # how do I add benchmarking to just the communication part?
+        comm_start = time.time()
         for param in model.parameters():
             dist.all_reduce(tensor=param.grad, op=dist.ReduceOp.AVG, async_op=False)
             torch.cuda.synchronize()
+        comm_duration = time.time() - comm_start
 
         optimizer.step()
         torch.cuda.synchronize()
 
-    timeit.timeit(lambda: train_step(), number=5) # warmup
-    duration = timeit.timeit(lambda: train_step(), number=10)
-    if rank == 0:
-        print(f"Total time: {duration}")
+        total_duration = time.time() - total_start
+
+        return comm_duration, total_duration
+
+    comm_average = 0
+    total_average = 0
+    for i in range(15):
+        comm_duration, total_duration = train_step()
+        if i > 4:
+            comm_average = comm_duration/(i-4) + comm_average*(i-5)/(i-4)
+            total_average = total_duration/(i-4) + total_average*(i-5)/(i-4)
+
+    print(f"Rank {rank}: Total time {total_average}, Comm time {comm_average} ")
 
     # Cleanup to avoid warning
     dist.destroy_process_group()  
@@ -70,8 +84,8 @@ if __name__ == "__main__":
         context_length=256,
         d_model=1600,
         d_ff=6400,
-        num_layers=16,
-        num_heads=4,
+        num_layers=48,
+        num_heads=25,
         rope_theta=10_000,
     )
     optimizer = AdamW(model.parameters(), lr=0.01)
