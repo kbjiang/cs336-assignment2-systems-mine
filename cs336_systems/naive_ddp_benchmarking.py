@@ -32,7 +32,7 @@ def run_test(
     model: BasicsTransformerLM, 
     optimizer: AdamW, 
     batch_size: int = 4, 
-    context_length: int = 256, 
+    context_length: int = 512, 
 ) -> tuple[float, float]:
     setup(rank, world_size, "nccl")
     x, y = get_batch(
@@ -41,24 +41,32 @@ def run_test(
 
     model.to(get_device(rank, "nccl"))
     def train_step():
+        x, y = get_batch(
+            dataset, batch_size, context_length, get_device(rank, "nccl")
+        )
         total_start = time.time()
         y_hat = model(x)
         loss = cross_entropy(y_hat, y)
         optimizer.zero_grad()
         loss.backward()
         torch.cuda.synchronize()
-        # dist.barrier()
+
+        # Discussion!
+        # If I added dist.barrier() before timing communication, you'd be measuring
+        # from when all ranks are ready, not from when this rank reaches the communication.
+        # This might hide differences in how long backward takes on different ranks.
 
         # 2.1 all-reduce to average the gradients and copy to each rank
-        # how do I add benchmarking to just the communication part?
+        # benchmarking just the communication part
         comm_start = time.time()
         for param in model.parameters():
-            dist.all_reduce(tensor=param.grad, op=dist.ReduceOp.AVG, async_op=False)
-            torch.cuda.synchronize()
+            dist.all_reduce(tensor=param.grad, op=dist.ReduceOp.AVG, async_op=True)
+            # torch.cuda.synchronize()
         comm_duration = time.time() - comm_start
 
         optimizer.step()
         torch.cuda.synchronize()
+        # dist.barrier()
 
         total_duration = time.time() - total_start
 
@@ -72,7 +80,7 @@ def run_test(
             comm_average = comm_duration/(i-4) + comm_average*(i-5)/(i-4)
             total_average = total_duration/(i-4) + total_average*(i-5)/(i-4)
 
-    print(f"Rank {rank}: Total time {total_average}, Comm time {comm_average} ")
+    print(f"Rank {rank}: Total time {total_average:.5f}, Comm time {comm_average:.5f} ")
 
     # Cleanup to avoid warning
     dist.destroy_process_group()  
@@ -81,7 +89,7 @@ def run_test(
 if __name__ == "__main__":
     model = BasicsTransformerLM(
         vocab_size=10_000,
-        context_length=256,
+        context_length=512,
         d_model=1600,
         d_ff=6400,
         num_layers=48,

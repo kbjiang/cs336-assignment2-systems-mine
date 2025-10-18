@@ -37,9 +37,10 @@ def all_reduce_benchmarking(rank, backend, world_size, data_size):
     
     # benchmarking
     start_time = time.time()
-    dist.all_reduce(data, async_op=False)
-    if backend == "nccl":
-        torch.cuda.synchronize()
+    for _ in range(100):
+        dist.all_reduce(data, async_op=False)
+        if backend == "nccl":
+            torch.cuda.synchronize()
     duration = time.time() - start_time
 
     # Gather durations from all ranks
@@ -48,7 +49,7 @@ def all_reduce_benchmarking(rank, backend, world_size, data_size):
         durations = [None] * world_size
         dist.all_gather_object(durations, duration)
         if rank == 0:
-            print(f"{backend}, {data_size}MB, world_size={world_size}: {sum(durations)/world_size}")
+            print(f"{backend}, {data_size}MB, world_size={world_size}: {sum(durations)/world_size:.5f}")
     else:
         # For NCCL, use tensor-based gathering
         duration = torch.tensor([duration], device=f"cuda:{rank}")
@@ -56,7 +57,7 @@ def all_reduce_benchmarking(rank, backend, world_size, data_size):
         dist.all_gather(gathered, duration)
         if rank == 0:
             durations = [t.item() for t in gathered]
-            print(f"{backend}, {data_size}MB, world_size={world_size}: {sum(durations)/world_size}")
+            print(f"{backend}, {data_size}MB, world_size={world_size}: {sum(durations)/world_size:.5f}")
 
     dist.destroy_process_group()  # Cleanup to avoid warning
 
