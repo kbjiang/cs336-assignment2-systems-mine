@@ -56,10 +56,17 @@ def run_test(
         # 2.1 all-reduce to average the gradients and copy to each rank
         # benchmarking just the communication part
         comm_start = time.time()
-        for param in model.parameters():
-            dist.all_reduce(tensor=param.grad, op=dist.ReduceOp.AVG, async_op=False)
+        # flatten gradients so only one `all_reduce` will suffice
+        grads = [param.grad for param in model.parameters()]
+        grads_flat = torch._utils._flatten_dense_tensors(grads)
+        dist.all_reduce(tensor=grads_flat, op=dist.ReduceOp.AVG, async_op=False)
         torch.cuda.synchronize()
         comm_duration = time.time() - comm_start
+
+        # assign communicated gradients to model 
+        grads_unflat = torch._utils._unflatten_dense_tensors(grads_flat, grads)
+        for param, grad in zip(model.parameters(), grads_unflat):
+            param.grad = grad
 
         optimizer.step()
         torch.cuda.synchronize()

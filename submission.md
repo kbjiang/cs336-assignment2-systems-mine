@@ -443,7 +443,8 @@ triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=
     3. NCCL algorithm selection: NCCL often selects different communication algorithms based on message size (ring, tree, etc.). Warming up with the wrong size won't prepare the right algorithm.
 1. Synchronization in comminucation
     1. `async_op=False` is equivalent to `wait` func, blocking till all comminucation operations is queued. 
-    1. Call `torch.cuda.synchronize()` to wait for CUDA operations to complete when benchmarking on GPUs. Note that this is necessary even when calling communication operations with `async_op=False`, which returns when the operation is queued on the GPU (as opposed to when the communication actually finishes). For more detail see [here](https://github.com/pytorch/pytorch/issues/68112#issuecomment-965932386) and [here](https://docs.pytorch.org/docs/stable/distributed.html#synchronous-and-asynchronous-collective-operations)
+    1. Call `torch.cuda.synchronize()` to wait for CUDA operations to complete when benchmarking on GPUs. Note that this is necessary even when calling communication operations with `async_op=False`, which returns when the operation is queued on the GPU (as opposed to when the communication actually finishes). For more detail see [here](https://github.com/pytorch/pytorch/issues/68112#issuecomment-965932386), [here](https://docs.pytorch.org/docs/stable/distributed.html#synchronous-and-asynchronous-collective-operations) and [here](https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-streams).
+    1. ![From the assignment](async-communication.png)
     1. collective operations act as an implicit synchronization point - all ranks must participate and wait for each other during the operation itself. Like an implicit `dist.barrier()`.
 ### Ansers
 #### distributed_commnucation_single_node
@@ -462,5 +463,16 @@ triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=
     - the time with `nccl` hardly increased with tensor size. I think this is because of large number of kernels and highly optimized communication in `dist`.
 #### naive_ddp_benchmarking
 1. Two sets of `time.time()`, one for total time and the other just for communication. Needs to pay extra attention to the use of `dist.barrier()`. See discussion in script.
-1. 
+1. Durations. Interesting how communication time is different while total time is similar. It's unlikely that two GPUs take very different time for forward/backward passes. So implicit waiting between ranks?
+    ```
+    Rank 1: Total time 1.05300, Comm time 0.01147 
+    Rank 0: Total time 1.05300, Comm time 0.05212 
+    ```
+#### minimal_ddp_flat_benchmarking
+1. Durations. The comm time is shorter with batched communication as expected.
+    ```
+    Rank 1: Total time 1.04605, Comm time 0.00218 
+    Rank 0: Total time 1.04608, Comm time 0.04185
+    ```
+
 
