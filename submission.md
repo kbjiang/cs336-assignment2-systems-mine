@@ -444,7 +444,7 @@ triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=
 1. Synchronization in comminucation
     1. `async_op=False` is equivalent to `wait` func, blocking till all comminucation operations is queued. 
     1. Call `torch.cuda.synchronize()` to wait for CUDA operations to complete when benchmarking on GPUs. Note that this is necessary even when calling communication operations with `async_op=False`, which returns when the operation is queued on the GPU (as opposed to when the communication actually finishes). For more detail see [here](https://github.com/pytorch/pytorch/issues/68112#issuecomment-965932386) and [here](https://docs.pytorch.org/docs/stable/distributed.html#synchronous-and-asynchronous-collective-operations)
-    1. [link](https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-streams) to supscript.![From the assignment](async-communication.png)
+    1. [link](https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-streams) to supscript.![From the assignment](cs336_systems/assets/async-communication.png)
     1. collective operations act as an implicit synchronization point - all ranks must participate and wait for each other during the operation itself. Like an implicit `dist.barrier()`.
 1. `hook` function
     1. on tensor
@@ -479,10 +479,11 @@ triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=
     Rank 0: Total time 1.04608, Comm time 0.04185
     ```
 #### ddp_overlap_individual_parameters_benchmarking
-1. Durations
+1. Durations. The total time is not 
     ```
     Rank 1: Total time 1.04260
     Rank 0: Total time 1.04255
     ```
+1. Nsys comparison. ![](cs336_systems/assets/ddp_nsys_comparison.png)
 
 

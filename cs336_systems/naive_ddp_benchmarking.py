@@ -10,6 +10,8 @@ from cs336_basics.data import get_batch
 from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy, softmax
 
+import torch.cuda.nvtx as nvtx
+
 def setup(rank, world_size, backend):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29503"
@@ -44,7 +46,9 @@ def run_test(
         y_hat = model(x)
         loss = cross_entropy(y_hat, y)
         optimizer.zero_grad()
-        loss.backward()
+        with nvtx.range("backward pass"):
+            loss.backward()
+        # this sync is needed to accurately calculate comm_start.
         torch.cuda.synchronize()
 
         # Discussion!
