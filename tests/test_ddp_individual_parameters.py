@@ -38,7 +38,7 @@ def test_DistributedDataParallelIndividualParameters(model_class):
 
 def _test_DistributedDataParallelIndividualParameters(rank: int, world_size: int, model_class: Type[torch.nn.Module]):
     # Use gloo backend for CPU
-    device = _setup_process_group(rank=rank, world_size=world_size, backend="gloo")
+    device = _setup_process_group(rank=rank, world_size=world_size, backend="nccl")
     # Execute barrier prior to running test to ensure that every process
     # has finished initialization and that the following test
     # immediately exiting due to a skip doesn't cause flakiness.
