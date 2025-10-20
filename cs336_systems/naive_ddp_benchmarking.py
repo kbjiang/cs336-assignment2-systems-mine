@@ -32,14 +32,13 @@ def run_test(
     model: BasicsTransformerLM, 
     optimizer: AdamW, 
     batch_size: int = 4, 
-    context_length: int = 512, 
 ) -> tuple[float, float]:
     setup(rank, world_size, "nccl")
 
     model.to(get_device(rank, "nccl"))
     def train_step():
         x, y = get_batch(
-            dataset, batch_size, context_length, get_device(rank, "nccl")
+            dataset, batch_size, model.context_length, get_device(rank, "nccl")
         )
         total_start = time.time()
         y_hat = model(x)
