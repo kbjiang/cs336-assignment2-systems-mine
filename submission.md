@@ -479,6 +479,8 @@ triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=
     Rank 0: Total time 1.04608, Comm time 0.04185
     ```
 #### ddp_overlap_individual_parameters_benchmarking
+1. `register_post_accumulate_grad_hook` only works with leaf tensor. Luckily all parameters are leaves, unlike activations.
+1. Good use of `__get_attr__` to inherit attributes from the wrapped module.
 1. Durations. The total time is not 
     ```
     Rank 1: Total time 1.04260
