@@ -86,20 +86,31 @@ class DDPBucketed:
     def ddp_bucketed_on_train_batch_start(self):
         if not self.buckets:
             self.buckets = get_buckets(self.module, self.bucket_size_mb)
+            test_bucket = self.buckets[-1]
+            print(len(test_bucket))
+            for param in test_bucket:
+                print(param.data)
+                print(param.data.shape)
+                print(param.requires_grad)
             
-            # For each bucket, register hook on the FIRST parameter
-            # We organized buckets in reverse order, so bucket[0] is the 
-            # parameter whose gradient will be ready LAST
-            for bucket in self.buckets:
-                last_param = bucket[0]  # First parameter in this bucket (last in backward)
-                
+            # For each bucket, register hook on the last parameter
+            for i, bucket in enumerate(self.buckets):
                 # Create a hook that captures this specific bucket
                 def make_hook(bucket_params):
                     def hook(param):
                         # When this fires, ALL params in bucket have gradients
                         # 1. Flatten the gradients
                         bucket_grads = [p.grad for p in bucket_params]
-                        flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
+                        # flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
+                        try:
+                            flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
+                        except TypeError as e:
+                            print(len(self.buckets))
+                            print(f"Bucket number {i}.")
+                            print(bucket_params)
+                            print(len(bucket_params))
+                            print(len(bucket_grads))
+                            # flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
                         
                         # 2. All-reduce the flattened gradient
                         handle = dist.all_reduce(flat_grad, op=dist.ReduceOp.AVG, async_op=True)
@@ -108,6 +119,8 @@ class DDPBucketed:
                         self.handles.append((handle, flat_grad, bucket_params))
                     return hook
                 
+                # register on the last parameter (last in backward) of the bucket
+                last_param = bucket[-1] 
                 last_param.register_post_accumulate_grad_hook(make_hook(bucket))
 
     def ddp_bucketed_on_after_backward(self):
@@ -146,6 +159,7 @@ def run_test(
 
     optimizer = AdamW(model.module.parameters(), lr=0.01)
     def train_step():
+        torch.manual_seed(42)
         x, y = get_batch(
             dataset, batch_size, model.module.context_length, get_device(rank, "nccl")
         )
@@ -188,6 +202,7 @@ if __name__ == "__main__":
         num_heads=25,
         rope_theta=10_000,
     )
+    np.random.seed(42)
     dataset = np.random.randint(0, 10_000, 1024)
     world_size = 2
     bucket_size_mb = 100.0
