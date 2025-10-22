@@ -55,7 +55,7 @@ def _test_DistributedDataParallelCPU(
     model_class: Type[torch.nn.Module],
 ):
     # Use gloo backend for CPU
-    device = _setup_process_group(rank=rank, world_size=world_size, backend="gloo")
+    device = _setup_process_group(rank=rank, world_size=world_size, backend="nccl")
     # Execute barrier prior to running test to ensure that every process
     # has finished initialization and that the following test
     # immediately exiting due to a skip doesn't cause flakiness.

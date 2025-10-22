@@ -27,29 +27,103 @@ def get_device(rank, backend="nccl"):
     else:
         raise ValueError("wrong backend")
 
+def get_buckets(model, bucket_size_mb:float) -> list[list[torch.tensor]]:
+    # get bucket size limit in num of elements
+    bucket_size_limit = (1024**2 * bucket_size_mb)//4
+    buckets = []
+    current_size = 0
+    current_bucket = []
+    for param in reversed(list(model.parameters())):
+        # skip params do not need grad calculation
+        if not param.requires_grad:
+            continue
+        # if current param is large
+        if param.nelement() > bucket_size_limit:
+            if current_bucket:  
+                buckets.append(current_bucket)
+                current_bucket = []
+                current_size = 0
+            buckets.append([param])
+        # if current param leads to overflow
+        elif param.nelement() + current_size > bucket_size_limit:
+            buckets.append(current_bucket)
+            current_bucket = [param]
+            current_size = param.nelement()
+        # if current param is ok
+        else:
+            current_bucket += [param]
+            current_size += param.nelement()
+    # final pieces if exists
+    if current_bucket:  
+        buckets.append(current_bucket)
+
+    return buckets
+
 class DDPBucketed:
+    """
+    Flow:
+    - Bucketing: Parameters are organized into self.buckets (list of lists)
+    - Hook registration: One hook per bucket, on the last parameter
+    - During backward: When last param's gradient is ready, hook fires
+    - In the hook: Flatten all gradients in that bucket → all_reduce
+    - After backward: Wait for all_reduce → unflatten → copy back
+    """
     def __init__(self, module: torch.nn.Module, bucket_size_mb: float):
         self.module = module
         self.handles = []  # collective op handles
-        def post_grad_hook(param) -> None:
-            # return immediately after all_reduce to continue back-prop
-            # need to append the handle for waiting later
-            handle = dist.all_reduce(tensor=param.grad, op=dist.ReduceOp.AVG, async_op=True)
-            self.handles.append(handle)
-            # print("hook is working.")
+        self.bucket_size_mb = bucket_size_mb
+        self.buckets = None
+        self.buckets_flat = None
+
+        # broadcast initial parameters
         for param in self.module.parameters():
-            if param.requires_grad:
-                param.register_post_accumulate_grad_hook(post_grad_hook)
-            # broadcast model params from rank 0 to every other rank
             dist.broadcast(tensor=param.data, src=0, async_op=False)
             # torch.cuda.synchronize()
+
     def __call__(self, *inputs, **kwargs):
         return self.module(*inputs, **kwargs)
-    def finish_gradient_synchronization(self):
-        """Wait for all async all_reduce operations to complete"""
-        for handle in self.handles:
+
+    def ddp_bucketed_on_train_batch_start(self):
+        if not self.buckets:
+            self.buckets = get_buckets(self.module, self.bucket_size_mb)
+            
+            # For each bucket, register hook on the LAST parameter
+            # (gradients flow in reverse, so last param's grad is ready last)
+            for bucket in self.buckets:
+                last_param = bucket[-1]  # Last parameter in this bucket
+                
+                # Create a hook that captures this specific bucket
+                def make_hook(bucket_params):
+                    def hook(param):
+                        # When this fires, ALL params in bucket have gradients
+                        # 1. Flatten the gradients
+                        bucket_grads = [p.grad for p in bucket_params]
+                        flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
+                        
+                        # 2. All-reduce the flattened gradient
+                        handle = dist.all_reduce(flat_grad, op=dist.ReduceOp.AVG, async_op=True)
+                        
+                        # 3. Store handle and the info needed to unflatten later
+                        self.handles.append((handle, flat_grad, bucket_params))
+                    return hook
+                
+                last_param.register_post_accumulate_grad_hook(make_hook(bucket))
+
+    def ddp_bucketed_on_after_backward(self):
+        """Wait for all async all_reduce operations and copy back"""
+        for handle, flat_grad, bucket_params in self.handles:
+            # Wait for this bucket's all_reduce
             handle.wait()
+            
+            # Unflatten the all-reduced gradient
+            unflat_grads = torch._utils._unflatten_dense_tensors(flat_grad, bucket_params)
+            
+            # Copy back to original parameters
+            for param, grad in zip(bucket_params, unflat_grads):
+                param.grad = grad
+        
         self.handles.clear()
+
     # to pass test.
     def __getattr__(self, name):
         return getattr(self.module, name)
