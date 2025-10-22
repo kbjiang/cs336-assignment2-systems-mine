@@ -87,10 +87,11 @@ class DDPBucketed:
         if not self.buckets:
             self.buckets = get_buckets(self.module, self.bucket_size_mb)
             
-            # For each bucket, register hook on the LAST parameter
-            # (gradients flow in reverse, so last param's grad is ready last)
+            # For each bucket, register hook on the FIRST parameter
+            # We organized buckets in reverse order, so bucket[0] is the 
+            # parameter whose gradient will be ready LAST
             for bucket in self.buckets:
-                last_param = bucket[-1]  # Last parameter in this bucket
+                last_param = bucket[0]  # First parameter in this bucket (last in backward)
                 
                 # Create a hook that captures this specific bucket
                 def make_hook(bucket_params):
@@ -133,13 +134,16 @@ def run_test(
     world_size: int,
     dataset: np.ndarray, 
     module: BasicsTransformerLM, 
+    bucket_size_mb: int,
     batch_size: int = 4, 
 ) -> tuple[float, float]:
     setup(rank, world_size, "nccl")
 
     # Move model to GPU BEFORE wrapping with DDP (for NCCL broadcast)
     module.to(get_device(rank, "nccl"))
-    model = DDPBucketed(module)
+    model = DDPBucketed(module, bucket_size_mb)
+    model.ddp_bucketed_on_train_batch_start()
+
     optimizer = AdamW(model.module.parameters(), lr=0.01)
     def train_step():
         x, y = get_batch(
@@ -151,7 +155,7 @@ def run_test(
         optimizer.zero_grad()
         with nvtx.range("backward pass"):
             loss.backward()
-        model.finish_gradient_synchronization()
+        model.ddp_bucketed_on_after_backward()
         optimizer.step()
         torch.cuda.synchronize()
 
@@ -186,4 +190,5 @@ if __name__ == "__main__":
     )
     dataset = np.random.randint(0, 10_000, 1024)
     world_size = 2
-    mp.spawn(fn=run_test, args=(world_size, dataset, module), nprocs=world_size, join=True)
+    bucket_size_mb = 100.0
+    mp.spawn(fn=run_test, args=(world_size, dataset, module, bucket_size_mb), nprocs=world_size, join=True)
