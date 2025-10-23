@@ -73,7 +73,7 @@ class DDPBucketed:
         self.handles = []  # collective op handles
         self.bucket_size_mb = bucket_size_mb
         self.buckets = None
-        self.buckets_flat = None
+        self.bucket_states = [] # used to track if gradient is ready for each bucket
 
         # broadcast initial parameters
         for param in self.module.parameters():
@@ -84,48 +84,49 @@ class DDPBucketed:
         return self.module(*inputs, **kwargs)
 
     def ddp_bucketed_on_train_batch_start(self):
-        if not self.buckets:
-            self.buckets = get_buckets(self.module, self.bucket_size_mb)
-            test_bucket = self.buckets[-1]
-            print(len(test_bucket))
-            for param in test_bucket:
-                print(param.data)
-                print(param.data.shape)
-                print(param.requires_grad)
-            
-            # For each bucket, register hook on the last parameter
-            for i, bucket in enumerate(self.buckets):
-                # Create a hook that captures this specific bucket
-                def make_hook(bucket_params):
+        if self.buckets:
+            return
+
+        self.buckets = get_buckets(self.module, self.bucket_size_mb)
+        
+        # For each bucket, register hook on the last parameter
+        for bucket_id, bucket in enumerate(self.buckets):
+            state = {
+                "bucket_id": bucket_id,
+                "params": bucket,
+                "grad_counts": 0,
+            }
+            self.bucket_states.append(state)
+
+            # Create a hook for each parameter in this bucket
+            # but the all_reduce only run once when every gradient is ready in this bucket
+            for param in bucket:
+                def make_hook(bucket_id):
                     def hook(param):
-                        # When this fires, ALL params in bucket have gradients
-                        # 1. Flatten the gradients
-                        bucket_grads = [p.grad for p in bucket_params]
-                        # flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
-                        try:
+                        # get the corresponding state from self
+                        st = self.bucket_states[bucket_id]
+                        bucket_params = st["params"]
+                        # if grad for THIS param is ready, note it down
+                        if param.grad is not None:
+                            st["grad_counts"] += 1
+                        
+                        # if this param is the last one, ready for all_reduce
+                        if st["grad_counts"] == len(bucket_params):
+                            bucket_grads = [p.grad for p in bucket_params]
                             flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
-                        except TypeError as e:
-                            print(len(self.buckets))
-                            print(f"Bucket number {i}.")
-                            print(bucket_params)
-                            print(len(bucket_params))
-                            print(len(bucket_grads))
-                            # flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
                         
-                        # 2. All-reduce the flattened gradient
-                        handle = dist.all_reduce(flat_grad, op=dist.ReduceOp.AVG, async_op=True)
+                            # 2. All-reduce the flattened gradient
+                            handle = dist.all_reduce(flat_grad, op=dist.ReduceOp.AVG, async_op=True)
                         
-                        # 3. Store handle and the info needed to unflatten later
-                        self.handles.append((handle, flat_grad, bucket_params))
+                            # 3. Store handle and the info needed to unflatten later
+                            self.handles.append((handle, flat_grad, bucket_id))
                     return hook
-                
-                # register on the last parameter (last in backward) of the bucket
-                last_param = bucket[-1] 
-                last_param.register_post_accumulate_grad_hook(make_hook(bucket))
+                param.register_post_accumulate_grad_hook(make_hook(bucket_id))
 
     def ddp_bucketed_on_after_backward(self):
         """Wait for all async all_reduce operations and copy back"""
-        for handle, flat_grad, bucket_params in self.handles:
+        for handle, flat_grad, bucket_id in self.handles:
+            bucket_params = self.bucket_states[bucket_id]["params"]
             # Wait for this bucket's all_reduce
             handle.wait()
             
@@ -134,9 +135,13 @@ class DDPBucketed:
             
             # Copy back to original parameters
             for param, grad in zip(bucket_params, unflat_grads):
-                param.grad = grad
+                param.grad.copy_(grad)
         
+            # restore this bucket's state
+            self.bucket_states[bucket_id]["grad_counts"] = 0
+
         self.handles.clear()
+
 
     # to pass test.
     def __getattr__(self, name):
@@ -205,5 +210,5 @@ if __name__ == "__main__":
     np.random.seed(42)
     dataset = np.random.randint(0, 10_000, 1024)
     world_size = 2
-    bucket_size_mb = 100.0
+    bucket_size_mb = 1.0
     mp.spawn(fn=run_test, args=(world_size, dataset, module, bucket_size_mb), nprocs=world_size, join=True)
