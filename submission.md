@@ -483,8 +483,8 @@ triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=
 1. Good use of `__get_attr__` to inherit attributes from the wrapped module.
 1. Durations. The total time is not 
     ```
-    Rank 1: Total time 1.04260
-    Rank 0: Total time 1.04255
+    Rank 1: Total time 1.03150
+    Rank 0: Total time 1.03149
     ```
 1. Nsys comparison. ![](cs336_systems/assets/ddp_nsys_comparison.png)
 
