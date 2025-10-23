@@ -48,7 +48,8 @@ class DDPIndividualParameters:
     def finish_gradient_synchronization(self):
         """Wait for all async all_reduce operations to complete"""
         for handle in self.handles:
-            handle.wait()
+            if handle is not None:
+                handle.wait()
         self.handles.clear()
     # to pass test.
     def __getattr__(self, name):

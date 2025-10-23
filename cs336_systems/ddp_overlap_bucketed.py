@@ -11,6 +11,7 @@ from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy, softmax
 
 import torch.cuda.nvtx as nvtx
+import argparse
 
 def setup(rank, world_size, backend="nccl"):
     os.environ["MASTER_ADDR"] = "localhost"
@@ -106,9 +107,12 @@ class DDPBucketed:
                         # get the corresponding state from self
                         st = self.bucket_states[bucket_id]
                         bucket_params = st["params"]
-                        # if grad for THIS param is ready, note it down
-                        if param.grad is not None:
-                            st["grad_counts"] += 1
+                        # if grad for THIS param is not ready, something's wrong
+                        if param.grad is None:
+                            raise ValueError("Something's wrong. Gradient should've been ready before hook fired.")
+
+                        # count grad for THIS param
+                        st["grad_counts"] += 1
                         
                         # if this param is the last one, ready for all_reduce
                         if st["grad_counts"] == len(bucket_params):
@@ -128,7 +132,8 @@ class DDPBucketed:
         for handle, flat_grad, bucket_id in self.handles:
             bucket_params = self.bucket_states[bucket_id]["params"]
             # Wait for this bucket's all_reduce
-            handle.wait()
+            if handle is not None:
+                handle.wait()
             
             # Unflatten the all-reduced gradient
             unflat_grads = torch._utils._unflatten_dense_tensors(flat_grad, bucket_params)
@@ -196,6 +201,10 @@ def run_test(
     dist.destroy_process_group()  
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bucket-size-mb", type=float, default=10.0)
+    args = parser.parse_args()
+
     module = BasicsTransformerLM(
         vocab_size=10_000,
         context_length=512,
@@ -207,5 +216,4 @@ if __name__ == "__main__":
     )
     dataset = np.random.randint(0, 10_000, 1024)
     world_size = 2
-    bucket_size_mb = 1.0
-    mp.spawn(fn=run_test, args=(world_size, dataset, module, bucket_size_mb), nprocs=world_size, join=True)
+    mp.spawn(fn=run_test, args=(world_size, dataset, module, args.bucket_size_mb), nprocs=world_size, join=True)
