@@ -164,7 +164,6 @@ def run_test(
 
     optimizer = AdamW(model.module.parameters(), lr=0.01)
     def train_step():
-        torch.manual_seed(42)
         x, y = get_batch(
             dataset, batch_size, model.module.context_length, get_device(rank, "nccl")
         )
@@ -176,7 +175,6 @@ def run_test(
             loss.backward()
         model.ddp_bucketed_on_after_backward()
         optimizer.step()
-        torch.cuda.synchronize()
 
         # Discussion!
         # If I added dist.barrier() before timing communication, I'd be measuring
@@ -207,7 +205,6 @@ if __name__ == "__main__":
         num_heads=25,
         rope_theta=10_000,
     )
-    np.random.seed(42)
     dataset = np.random.randint(0, 10_000, 1024)
     world_size = 2
     bucket_size_mb = 1.0
