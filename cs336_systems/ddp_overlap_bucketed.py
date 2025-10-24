@@ -120,7 +120,8 @@ class DDPBucketed:
                             flat_grad = torch._utils._flatten_dense_tensors(bucket_grads)
                         
                             # 2. All-reduce the flattened gradient
-                            handle = dist.all_reduce(flat_grad, op=dist.ReduceOp.AVG, async_op=True)
+                            with nvtx.range(f"bucket allreduce {bucket_id}"):
+                                handle = dist.all_reduce(flat_grad, op=dist.ReduceOp.AVG, async_op=True)
                         
                             # 3. Store handle and the info needed to unflatten later
                             self.handles.append((handle, flat_grad, bucket_id))
@@ -133,7 +134,8 @@ class DDPBucketed:
             bucket_params = self.bucket_states[bucket_id]["params"]
             # Wait for this bucket's all_reduce
             if handle is not None:
-                handle.wait()
+                with nvtx.range(f"bucket wait {bucket_id}"):
+                    handle.wait()
             
             # Unflatten the all-reduced gradient
             unflat_grads = torch._utils._unflatten_dense_tensors(flat_grad, bucket_params)
