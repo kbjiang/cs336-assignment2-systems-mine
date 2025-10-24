@@ -488,4 +488,13 @@ triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=
     ```
 1. Nsys comparison. ![](cs336_systems/assets/ddp_nsys_comparison.png)
 
+#### ddp_overlap_bucketed
+1. Learnt a ton. See the xyz.md
+
+#### ddp_bucketed_benchmarking
+1. the nvtx and memory proflier
+1. derivation
+    1. The time to communicate/calculate gradient of a bucket can be calculated as $t_b = s_b/w$, where $s_b=s/n_b$ is the size of a bucket.
+    1. The time for entire backward is $t_b * n_b$, while that for total communications is $(t_b + o)*n_b + t_b$ where the last $t_b$ is because 1st communication occurs after backward finishing 1st bucket.
+    1. Total comm overhead is then $t_b + o*n_b$, which is $\frac{s}{w \ n_b} +o*n_b$. Optimal $n_b^* = \sqrt{\frac{s}{o\ w}}$. Say $s\approx 8 \text{GB}$, $o\approx 1 \text{ms}$ and $w\approx 20 \text{GB/s}$, then $n_b^* \approx 20$. 
 
