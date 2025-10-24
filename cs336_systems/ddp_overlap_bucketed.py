@@ -167,9 +167,8 @@ def run_test(
     # Move model to GPU BEFORE wrapping with DDP (for NCCL broadcast)
     module.to(get_device(rank, "nccl"))
     model = DDPBucketed(module, bucket_size_mb)
-    model.ddp_bucketed_on_train_batch_start()
-
     optimizer = AdamW(model.module.parameters(), lr=0.01)
+
     def train_step():
         x, y = get_batch(
             dataset, batch_size, model.module.context_length, get_device(rank, "nccl")
@@ -192,15 +191,25 @@ def run_test(
 
         return total_duration
 
-    total_average = 0
-    for i in range(15):
-        total_duration = train_step()
-        if i > 4:
-            total_average = total_duration/(i-4) + total_average*(i-5)/(i-4)
+    # start recording memroy history
+    torch.cuda.memory._record_memory_history(max_entries=1000_000)
+    model.ddp_bucketed_on_train_batch_start()
 
-    print(f"Rank {rank}: Total time {total_average:.5f}")
+    total_average = 0
+    # for i in range(15):
+    for i in range(2):
+        total_duration = train_step()
+        # if i > 4:
+        #     total_average = total_duration/(i-4) + total_average*(i-5)/(i-4)
+
+    # print(f"Rank {rank}: Total time {total_average:.5f}")
     # Cleanup to avoid warning
     dist.destroy_process_group()  
+
+    # Savea pickle file to be loaded by PyTorch's online tool.
+    torch.cuda.memory._dump_snapshot("memory-25mb.pickle")
+    # Stop recording history
+    torch.cuda.memory._record_memory_history(enabled=None)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
