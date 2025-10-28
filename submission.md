@@ -498,3 +498,22 @@ triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_stages=4, num_warps=
     1. The time for entire backward is $t_b * n_b$, while that for total communications is $(t_b + o)*n_b + t_b$ where the last $t_b$ is because 1st communication occurs after backward finishing 1st bucket.
     1. Total comm overhead is then $t_b + o*n_b$, which is $\frac{s}{w \ n_b} +o*n_b$. Optimal $n_b^* = \sqrt{\frac{s}{o\ w}}$. Say $s\approx 8 \text{GB}$, $o\approx 1 \text{ms}$ and $w\approx 20 \text{GB/s}$, then $n_b^* \approx 20$. 
 
+## 2.4 4D Parallelism
+### Learning
+1. https://jax-ml.github.io/scaling-book/training/ has a lot of calculations with real hardware parameters. Need to come back to.
+    1. The name of the game is to stay `compute bound` therefore parallelism strategy matters. 
+        1. Batch size is a resource, use it wisely?
+        1. E.g., mixing FSDP and TP can help when batch size is not large. ![](cs336_systems/assets/batch-size-vs-parallelization-strategies.png)
+    1. Notice it ignored `seq_len` dimension and every token is one batch item therefore input is always `BxD`.
+    1. Go over the exercise at the end.
+        1. See how much memeory activations will take (tens of TB) if `B`, `D`, `F` are both large. That's why we need tricks like `recomputation` and only keep activations for one block at a time (streaming).
+
+### Answer
+#### communication_accounting
+1. w + G + OS
+    1. W: L blocks x 2 layer/block x (d_model x d_ff) params/layer x 4 bytes/param
+    1. G = W, OS = 2 x W, W + G + OS = 4 x w = 3.27TB
+    1. For backward we need both gradient communication buffer and activations, which depends on bathc size.
+1. pass
+1. Just use equation $B/N > \alpha^2/(M_x M_Y F)$, with $N=16*16*4$ and $M_x =2, M_y=1$. See https://jax-ml.github.io/scaling-book/training/.
+1. pass
