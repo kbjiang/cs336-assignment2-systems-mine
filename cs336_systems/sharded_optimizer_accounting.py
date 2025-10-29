@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import argparse
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -63,7 +64,7 @@ def bytes_to_gb(b: int) -> float:
 
 def run_scenario(
         model_ctor, dataset: np.ndarray, device: torch.device, batch_size: int, sharded: bool,
-        warmup_steps: int = 2, train_steps: int = 5,
+        warmup_steps: int, train_steps: int,
     ) -> tuple[pd.DataFrame, Dict[str, object]]:
     # Fresh model per scenario to avoid residual optimizer state or allocated buffers
     model = model_ctor().to(device)
@@ -157,6 +158,10 @@ def run_scenario(
     if iteration_times:
         breakdown["iteration_time_series_sec"] = [round(t, 6) for t in iteration_times]
         breakdown["iteration_time_mean_sec"] = round(sum(iteration_times) / len(iteration_times), 6)
+        # Standard deviation (population) of iteration times
+        mean_t = breakdown["iteration_time_mean_sec"]
+        var_t = sum((t - mean_t) ** 2 for t in iteration_times) / len(iteration_times)
+        breakdown["iteration_time_std_sec"] = round(var_t ** 0.5, 6)
 
 
     # Convert to DataFrame for aggregation
@@ -183,7 +188,7 @@ def run_scenario(
 # Main per-rank worker
 ###############################################################################
 
-def worker(rank: int, world_size: int, batch_size: int):
+def worker(rank: int, world_size: int, batch_size: int, warmup_steps: int, train_steps: int):
     setup(rank, world_size, backend="nccl")
     device = torch.device(get_device(rank, "nccl"))
 
@@ -203,10 +208,16 @@ def worker(rank: int, world_size: int, batch_size: int):
     dataset = np.random.randint(0, 10_000, size=4096)
 
     # Run both scenarios
-    unsharded_metrics_df, unsharded_breakdown = run_scenario(model_ctor, dataset, device, batch_size, sharded=False)
+    unsharded_metrics_df, unsharded_breakdown = run_scenario(
+        model_ctor, dataset, device, batch_size, sharded=False,
+        warmup_steps=warmup_steps, train_steps=train_steps,
+    )
     # Barrier to avoid overlapping allocations influencing next scenario peak
     dist.barrier()
-    sharded_metrics_df, sharded_breakdown = run_scenario(model_ctor, dataset, device, batch_size, sharded=True)
+    sharded_metrics_df, sharded_breakdown = run_scenario(
+        model_ctor, dataset, device, batch_size, sharded=True,
+        warmup_steps=warmup_steps, train_steps=train_steps,
+    )
 
     # Rank 0 aggregates & prints summary
     if rank == 0:
@@ -241,6 +252,16 @@ def worker(rank: int, world_size: int, batch_size: int):
 ###############################################################################
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Sharded optimizer memory & timing profiling")
+    parser.add_argument("--batch-size", type=int, default=4, help="Per-rank batch size")
+    parser.add_argument("--warmup-steps", type=int, default=2, help="Warmup steps before measurement loop")
+    parser.add_argument("--train-steps", type=int, default=100, help="Measured training iterations")
+    args = parser.parse_args()
+
+    # Spawn one process per rank
     world_size = 2
-    batch_size = 4
-    mp.spawn(worker, nprocs=world_size, args=(world_size, batch_size))
+    mp.spawn(
+        worker,
+        nprocs=world_size,
+        args=(world_size, args.batch_size, args.warmup_steps, args.train_steps),
+    )
