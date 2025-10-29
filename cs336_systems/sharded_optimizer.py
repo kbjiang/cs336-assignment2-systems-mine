@@ -11,6 +11,7 @@ from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy, softmax
 
 import torch.cuda.nvtx as nvtx
+import json
 
 def setup(rank, world_size, backend="nccl"):
     os.environ["MASTER_ADDR"] = "localhost"
@@ -65,10 +66,10 @@ class OptimizerSharded(torch.optim.Optimizer):
         # now real stuff
         # self.params = list(params)
         self.idx_half = get_equal_halves([p.nelement() for p in self.params])
-        self.params_1st = self.params[:self.idx_half]
-        self.params_2nd = self.params[self.idx_half:]
+        self.params_0th = self.params[:self.idx_half]
+        self.params_1st = self.params[self.idx_half:]
         self.rank = dist.get_rank()
-        self._params = self.params_1st if self.rank == 0 else self.params_2nd
+        self._params = self.params_0th if self.rank == 0 else self.params_1st
         self._optimizer = optimizer_cls(self._params, **kwargs)
 
     def step(self, closure=None, **kwargs):
@@ -79,71 +80,101 @@ class OptimizerSharded(torch.optim.Optimizer):
         self._optimizer.step(**kwargs)
 
         # both ranks need to define flat_params_* for broadcasting/receiving
+        flat_params_0th = torch._utils._flatten_dense_tensors(self.params_0th)
         flat_params_1st = torch._utils._flatten_dense_tensors(self.params_1st)
-        flat_params_2nd = torch._utils._flatten_dense_tensors(self.params_2nd)
-        dist.broadcast(flat_params_1st, src=0, async_op=False)
-        dist.broadcast(flat_params_2nd, src=1, async_op=False)
+        dist.broadcast(flat_params_0th, src=0, async_op=False)
+        dist.broadcast(flat_params_1st, src=1, async_op=False)
 
-        # update 1st half params if rank 1
+        # update 0th half params if rank 1
         if self.rank == 1:
+            recv_params_0th = torch._utils._unflatten_dense_tensors(flat_params_0th, self.params_0th)
+            for p, new in zip(self.params_0th, recv_params_0th):
+                p.data.copy_(new)
+        
+        # update 1st half params if rank 0
+        if self.rank == 0:
             recv_params_1st = torch._utils._unflatten_dense_tensors(flat_params_1st, self.params_1st)
             for p, new in zip(self.params_1st, recv_params_1st):
                 p.data.copy_(new)
-        
-        # update 2nd half params if rank 0
-        if self.rank == 0:
-            recv_params_2nd = torch._utils._unflatten_dense_tensors(flat_params_2nd, self.params_2nd)
-            for p, new in zip(self.params_2nd, recv_params_2nd):
-                p.data.copy_(new)
+
+def _all_reduce_max(value: int, device: torch.device) -> int:
+    t = torch.tensor([value], device=device, dtype=torch.int64)
+    dist.all_reduce(t, op=dist.ReduceOp.MAX)
+    return int(t.item())
+
+def report_memory(description: str, device: torch.device):
+    torch.cuda.synchronize(device)
+    current = torch.cuda.memory_allocated(device)
+    peak = torch.cuda.max_memory_allocated(device)
+    current = round(_all_reduce_max(current, device)/1024.**3, 3)
+    peak = round(_all_reduce_max(peak, device)/1024.**3, 3)
+    return {"description": description, "current mem GB": current, "peak mem GB": peak}
 
 def run_test(
     rank: int,
     world_size: int,
+    sharding: bool,
     dataset: np.ndarray, 
-    module: BasicsTransformerLM, 
+    model: BasicsTransformerLM, 
     batch_size: int = 4, 
 ) -> tuple[float, float]:
     setup(rank, world_size, "nccl")
 
     # Move model to GPU BEFORE wrapping with DDP (for NCCL broadcast)
-    module.to(get_device(rank, "nccl"))
-    model = DDPIndividualParameters(module)
-    optimizer = AdamW(model.module.parameters(), lr=0.01)
-    def train_step():
-        x, y = get_batch(
-            dataset, batch_size, model.module.context_length, get_device(rank, "nccl")
+    device = get_device(rank, "nccl")
+    model.to(device)
+    memory_metrics = []
+    torch.cuda.reset_peak_memory_stats(device)
+    memory_metrics.append(report_memory("after_model_init", device))
+
+    if sharding:
+        optimizer = OptimizerSharded(
+            params=model.parameters(),
+            optimizer_cls=torch.optim.AdamW,
+            lr=0.1,
+            weight_decay=0.1,
+            betas=(0.9, 0.999),
+            eps=1e-8,
         )
-        total_start = time.time()
+    else:
+        optimizer = torch.optim.AdamW(
+            params=model.parameters(),
+            lr=0.1,
+            weight_decay=0.1,
+            betas=(0.9, 0.999),
+            eps=1e-8,
+        )
+    def train_step(step_i):
+        x, y = get_batch(
+            dataset, batch_size, model.context_length, get_device(rank, "nccl")
+        )
         y_hat = model(x)
         loss = cross_entropy(y_hat, y)
         optimizer.zero_grad()
-        with nvtx.range("backward pass"):
-            loss.backward()
-        model.finish_gradient_synchronization()
+        loss.backward()
+        memory_metrics.append(report_memory(f"before step {step_i}", device))
         optimizer.step()
-        torch.cuda.synchronize()
+        memory_metrics.append(report_memory(f"after step {step_i}", device))
 
-        # Discussion!
-        # If I added dist.barrier() before timing communication, I'd be measuring
-        # from when all ranks are ready, not from when this rank reaches the communication.
-        # This might hide differences in how long backward takes on different ranks.
+    # start recording memroy history
+    torch.cuda.memory._record_memory_history(max_entries=1000_000)
+    for i in range(2):
+        train_step(i)
+    # Savea pickle file to be loaded by PyTorch's online tool.
+    torch.cuda.memory._dump_snapshot("memory-sharded.pickle")
+    # Stop recording history
+    torch.cuda.memory._record_memory_history(enabled=None)
 
-        total_duration = time.time() - total_start
-
-        return total_duration
-
-    total_average = 0
-    for i in range(15):
-        total_duration = train_step()
-        if i > 4:
-            total_average = total_duration/(i-4) + total_average*(i-5)/(i-4)
-
-    print(f"Rank {rank}: Total time {total_average:.5f}")
+    if rank == 0:
+        print(json.dumps(memory_metrics, indent=2))
+        # return memory_metrics
     # Cleanup to avoid warning
     dist.destroy_process_group()  
 
+
+
 if __name__ == "__main__":
-    module = BasicsTransformerLM(
+    model = BasicsTransformerLM(
         vocab_size=10_000,
         context_length=512,
         d_model=1600,
@@ -154,4 +185,5 @@ if __name__ == "__main__":
     )
     dataset = np.random.randint(0, 10_000, 1024)
     world_size = 2
-    mp.spawn(fn=run_test, args=(world_size, dataset, module), nprocs=world_size, join=True)
+    sharding = True
+    mp.spawn(fn=run_test, args=(world_size, sharding, dataset, model), nprocs=world_size, join=True)
